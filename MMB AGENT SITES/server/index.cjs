@@ -334,121 +334,120 @@ app.post('/api/scheduler/run', async (req, res) => {
   const profiles = schedule.selectedProfiles || schedule.assignments?.map(a => a.profileId) || [];
   console.log(`Profiles: ${profiles.length}`);
 
-  (async () => {
-    for (let i = 0; i < profiles.length; i++) {
-      // Check cancellation before each profile
-      if (cancelledSchedules.has(scheduleId)) {
-        console.log(`[Schedule ${scheduleId}] Cancelled — stopping after profile ${i}`);
-        break;
-      }
+  // Helper: run a single profile through its articles
+  async function runProfileTask(profileId, scheduleId, schedule, provider) {
+    const progressEntry = { profileId, status: 'starting', startedAt: Date.now(), articlesRead: 0 };
+    const existing = runningSchedules.get(scheduleId);
+    if (existing) existing.progress.push(progressEntry);
 
-      const profileId = profiles[i];
+    try {
+      const debugPort = await startProfileForSchedule(profileId, provider);
 
-      if (i > 0) {
-        const staggerDelay = randomDelay(
-          (schedule.profileDelayMin || 5) * 1000,
-          (schedule.profileDelayMax || 30) * 1000
-        );
-        console.log(`[Schedule] Waiting ${Math.round(staggerDelay / 1000)}s before next profile...`);
-        await sleep(staggerDelay);
-      }
+      if (debugPort) {
+        progressEntry.status = 'connected';
+        const agent = new ProfileAgent(profileId, `Sites-${profileId.slice(-4)}`, debugPort);
+        activeAgents.set(profileId, agent);
+        const connected = await agent.connect();
 
-      const progressEntry = { profileId, status: 'starting', startedAt: Date.now(), articlesRead: 0 };
-      const existing = runningSchedules.get(scheduleId);
-      if (existing) existing.progress.push(progressEntry);
+        if (connected) {
+          const articles = getArticlesForProfile(profileId, schedule);
+          const history = readHistoryData[profileId] || [];
+          const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+          const recentUrls = new Set(history.filter(h => h.readAt > cutoff).map(h => h.url));
+          let freshArticles = articles.filter(a => !recentUrls.has(a.url));
+          const sessionLimit = schedule.articlesPerSession ? Number(schedule.articlesPerSession) : undefined;
+          if (sessionLimit && sessionLimit > 0) freshArticles = freshArticles.slice(0, sessionLimit);
 
-      try {
-        const debugPort = await startProfileForSchedule(profileId, provider);
+          if (freshArticles.length > 0) {
+            console.log(`[Schedule] Profile ${profileId}: ${freshArticles.length} fresh articles`);
+            progressEntry.status = 'reading';
+            const articleDelay = randomDelay(
+              (schedule.articleDelayMin || 20) * 1000,
+              (schedule.articleDelayMax || 60) * 1000
+            ) / 1000;
 
-        if (debugPort) {
-          progressEntry.status = 'connected';
-          const agent = new ProfileAgent(profileId, `Sites-${profileId.slice(-4)}`, debugPort);
-          activeAgents.set(profileId, agent);
-          const connected = await agent.connect();
+            const results = await agent.runSession(freshArticles, {
+              trafficPreference: schedule.trafficSource || 'random',
+              articleDelay,
+              readTimeMin: schedule.readTimeMin || 30,
+              readTimeMax: schedule.readTimeMax || 300,
+              scrollSpeed: schedule.scrollSpeed || 'medium',
+              adPauseDurationMin: 0.5,
+              adPauseDurationMax: 2,
+            });
 
-          if (connected) {
-            const articles = getArticlesForProfile(profileId, schedule);
-
-            // Deduplicate against 24h read history
-            const history = readHistoryData[profileId] || [];
-            const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-            const recentUrls = new Set(history.filter(h => h.readAt > cutoff).map(h => h.url));
-            let freshArticles = articles.filter(a => !recentUrls.has(a.url));
-
-            // Apply per-session article limit
-            const sessionLimit = schedule.articlesPerSession ? Number(schedule.articlesPerSession) : undefined;
-            if (sessionLimit && sessionLimit > 0) freshArticles = freshArticles.slice(0, sessionLimit);
-
-            if (freshArticles.length > 0) {
-              console.log(`[Schedule] Profile ${profileId}: ${freshArticles.length} fresh articles`);
-              progressEntry.status = 'reading';
-
-              // Random article delay between min and max
-              const articleDelay = randomDelay(
-                (schedule.articleDelayMin || 20) * 1000,
-                (schedule.articleDelayMax || 60) * 1000
-              ) / 1000;
-
-              const results = await agent.runSession(freshArticles, {
-                trafficPreference: schedule.trafficSource || 'random',
-                articleDelay,
-                readTimeMin: schedule.readTimeMin || 30,
-                readTimeMax: schedule.readTimeMax || 300,
-                scrollSpeed: schedule.scrollSpeed || 'medium',
-                adPauseDurationMin: 0.5,
-                adPauseDurationMax: 2,
-              });
-
-              for (const r of results) {
-                if (r.result) {
-                  if (!readHistoryData[profileId]) readHistoryData[profileId] = [];
-                  readHistoryData[profileId].push({
-                    url: r.article.url,
-                    title: r.article.title,
-                    dwellTime: r.result.dwellTime || 0,
-                    trafficSource: r.result.trafficSource || 'random',
-                    readAt: Date.now(),
-                  });
-                  progressEntry.articlesRead++;
-                  analyticsData.totalReads++;
-                  analyticsData.totalDwellTime += r.result.dwellTime || 0;
-                  const src = r.result.trafficSource || 'direct';
-                  if (analyticsData.trafficSources[src] !== undefined) analyticsData.trafficSources[src]++;
-                  if (!analyticsData.perProfile[profileId]) analyticsData.perProfile[profileId] = { reads: 0, dwellTime: 0 };
-                  analyticsData.perProfile[profileId].reads++;
-                  analyticsData.perProfile[profileId].dwellTime += r.result.dwellTime || 0;
-                  const siteHost = new URL(r.article.url).hostname;
-                  if (!analyticsData.perSite[siteHost]) analyticsData.perSite[siteHost] = { reads: 0, dwellTime: 0 };
-                  analyticsData.perSite[siteHost].reads++;
-                  analyticsData.perSite[siteHost].dwellTime += r.result.dwellTime || 0;
-                  analyticsData.recentActivity.unshift({ profileId, url: r.article.url, title: r.article.title, dwellTime: r.result.dwellTime || 0, trafficSource: src, readAt: Date.now() });
-                  if (analyticsData.recentActivity.length > 100) analyticsData.recentActivity.length = 100;
-                }
+            for (const r of results) {
+              if (r.result) {
+                if (!readHistoryData[profileId]) readHistoryData[profileId] = [];
+                readHistoryData[profileId].push({ url: r.article.url, title: r.article.title, dwellTime: r.result.dwellTime || 0, trafficSource: r.result.trafficSource || 'random', readAt: Date.now() });
+                progressEntry.articlesRead++;
+                analyticsData.totalReads++;
+                analyticsData.totalDwellTime += r.result.dwellTime || 0;
+                const src = r.result.trafficSource || 'direct';
+                if (analyticsData.trafficSources[src] !== undefined) analyticsData.trafficSources[src]++;
+                if (!analyticsData.perProfile[profileId]) analyticsData.perProfile[profileId] = { reads: 0, dwellTime: 0 };
+                analyticsData.perProfile[profileId].reads++;
+                analyticsData.perProfile[profileId].dwellTime += r.result.dwellTime || 0;
+                const siteHost = new URL(r.article.url).hostname;
+                if (!analyticsData.perSite[siteHost]) analyticsData.perSite[siteHost] = { reads: 0, dwellTime: 0 };
+                analyticsData.perSite[siteHost].reads++;
+                analyticsData.perSite[siteHost].dwellTime += r.result.dwellTime || 0;
+                analyticsData.recentActivity.unshift({ profileId, url: r.article.url, title: r.article.title, dwellTime: r.result.dwellTime || 0, trafficSource: src, readAt: Date.now() });
+                if (analyticsData.recentActivity.length > 100) analyticsData.recentActivity.length = 100;
               }
-              saveReadHistory();
-              analyticsData.totalSessions++;
-              saveAnalytics();
-            } else {
-              console.log(`[Schedule] Profile ${profileId}: No fresh articles`);
-              progressEntry.status = 'skipped';
             }
+            saveReadHistory();
+            analyticsData.totalSessions++;
+            saveAnalytics();
+          } else {
+            console.log(`[Schedule] Profile ${profileId}: No fresh articles`);
+            progressEntry.status = 'skipped';
           }
-
-          await agent.disconnect();
-          activeAgents.delete(profileId);
-          await closeProfileForSchedule(profileId, provider);
-          progressEntry.status = 'done';
-          console.log(`[Schedule] Profile ${profileId} done`);
-        } else {
-          progressEntry.status = 'error';
-          console.error(`[Schedule] Profile ${profileId}: Could not get debug port`);
         }
-      } catch (err) {
-        progressEntry.status = 'error';
-        console.error(`[Schedule] Profile ${profileId} error: ${err.message}`);
-      }
 
-      progressEntry.completedAt = Date.now();
+        await agent.disconnect();
+        activeAgents.delete(profileId);
+        await closeProfileForSchedule(profileId, provider);
+        progressEntry.status = 'done';
+        console.log(`[Schedule] Profile ${profileId} done`);
+      } else {
+        progressEntry.status = 'error';
+        console.error(`[Schedule] Profile ${profileId}: Could not get debug port`);
+      }
+    } catch (err) {
+      progressEntry.status = 'error';
+      console.error(`[Schedule] Profile ${profileId} error: ${err.message}`);
+    }
+    progressEntry.completedAt = Date.now();
+  }
+
+  const concurrent = schedule.concurrent === true;
+  console.log(`Mode: ${concurrent ? 'CONCURRENT' : 'sequential'}`);
+
+  (async () => {
+    if (concurrent) {
+      // All profiles start at the same time (true parallel)
+      await Promise.all(profiles.map(profileId => {
+        if (cancelledSchedules.has(scheduleId)) return Promise.resolve();
+        return runProfileTask(profileId, scheduleId, schedule, provider);
+      }));
+    } else {
+      for (let i = 0; i < profiles.length; i++) {
+        if (cancelledSchedules.has(scheduleId)) {
+          console.log(`[Schedule ${scheduleId}] Cancelled — stopping after profile ${i}`);
+          break;
+        }
+        const profileId = profiles[i];
+        if (i > 0) {
+          const staggerDelay = randomDelay(
+            (schedule.profileDelayMin || 5) * 1000,
+            (schedule.profileDelayMax || 30) * 1000
+          );
+          console.log(`[Schedule] Waiting ${Math.round(staggerDelay / 1000)}s before next profile...`);
+          await sleep(staggerDelay);
+        }
+        await runProfileTask(profileId, scheduleId, schedule, provider);
+      }
     }
 
     const finalStatus = cancelledSchedules.has(scheduleId) ? 'idle' : 'completed';
@@ -991,6 +990,63 @@ app.post('/api/settings', (req, res) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function randomDelay(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CRON JOB — auto daily schedule
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+let cronJob = null;
+
+function startCronIfEnabled() {
+  if (cronJob) { cronJob.stop(); cronJob = null; }
+  if (!appSettings.cronEnabled) return;
+  try {
+    const cron = require('node-cron');
+    const expr = appSettings.cronSchedule || '0 9 * * *';
+    if (!cron.validate(expr)) { console.error('[Cron] Invalid expression:', expr); return; }
+    cronJob = cron.schedule(expr, async () => {
+      console.log('[Cron] Triggered:', new Date().toISOString());
+      // Load saved schedules from shuffle state and run them
+      const shuffleState = fs.existsSync(SHUFFLE_FILE) ? JSON.parse(fs.readFileSync(SHUFFLE_FILE, 'utf8')) : {};
+      const savedSchedules = shuffleState.schedules || [];
+      if (savedSchedules.length === 0) { console.log('[Cron] No saved schedules to run'); return; }
+      for (const schedule of savedSchedules) {
+        if (!schedule.enabled) continue;
+        const res = { json: (d) => console.log('[Cron] Schedule started:', d.scheduleId || d) };
+        try {
+          // Simulate POST /api/scheduler/run
+          const fakeReq = { body: schedule };
+          app._router.stack.find(l => l.route?.path === '/api/scheduler/run' && l.route.methods.post)
+            ?.route?.stack[0]?.handle(fakeReq, res, () => {});
+        } catch (err) { console.error('[Cron] Failed to run schedule:', err.message); }
+        await new Promise(r => setTimeout(r, 5000)); // 5s between schedules
+      }
+    });
+    console.log('[Cron] Started with expression:', expr);
+  } catch (err) {
+    console.error('[Cron] Failed to start:', err.message);
+  }
+}
+
+// Re-apply cron whenever settings change
+const _origSettingsPost = app._router.stack.find(l => l.route?.path === '/api/settings' && l.route.methods.post);
+
+// POST /api/cron/toggle — enable or disable cron
+app.post('/api/cron/toggle', (req, res) => {
+  const { enabled, schedule } = req.body;
+  appSettings.cronEnabled = !!enabled;
+  if (schedule) appSettings.cronSchedule = schedule;
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(appSettings, null, 2)); } catch {}
+  startCronIfEnabled();
+  res.json({ success: true, cronEnabled: appSettings.cronEnabled, cronSchedule: appSettings.cronSchedule });
+});
+
+// GET /api/cron/status
+app.get('/api/cron/status', (req, res) => {
+  res.json({ cronEnabled: appSettings.cronEnabled, cronSchedule: appSettings.cronSchedule, running: !!cronJob });
+});
+
+// Init on server start
+startCronIfEnabled();
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // START SERVER

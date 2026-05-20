@@ -356,9 +356,12 @@ class ProfileAgent {
       this.totalDwellTime += dwellSeconds;
 
       this.log('success', `Finished: "${articleTitle}" (${dwellSeconds}s dwell, ${trafficType})`);
-      await page.close();
-      return { dwellTime: dwellSeconds, trafficSource: trafficType };
+      // Keep page open if caller wants to use it for next-post navigation
+      if (!config.keepPageOpen) await page.close();
+      return { dwellTime: dwellSeconds, trafficSource: trafficType, page: config.keepPageOpen ? page : null };
     } catch (err) {
+      const fs = require('fs');
+      fs.appendFileSync('/tmp/agent_errors.log', `[${new Date().toISOString()}] ${this.profileName} | "${articleTitle}" | ERR: ${err.message}\n  Stack: ${err.stack}\n`);
       this.log('error', `Error reading "${articleTitle}": ${err.message}`);
       if (page) await page.close().catch(() => {});
       if (this.retryCount < this.maxRetries) {
@@ -371,17 +374,94 @@ class ProfileAgent {
     }
   }
 
+  // Try to click a "next post" link on the current page and return the landed URL
+  async _clickNextPost(page) {
+    try {
+      // Common "next post" selectors across WordPress, Ghost, custom themes
+      const nextSelectors = [
+        'a[rel="next"]',
+        '.nav-next a', '.next-post a', '.post-nav-next a',
+        'a.next', 'a.next-post', 'a.nextpostslink',
+        '[class*="next"] a[href*="/"]',
+        'a[href][class*="next"]',
+        '.navigation .next a', '#nav-below .nav-next a',
+        'a:has-text("Next")', 'a:has-text("Next Post")', 'a:has-text("→")',
+      ];
+      for (const sel of nextSelectors) {
+        const el = await page.$(sel).catch(() => null);
+        if (el) {
+          const href = await el.getAttribute('href').catch(() => null);
+          if (href && href.startsWith('http')) {
+            await humanMouseMove(page);
+            await sleep(randomDelay(800, 1800));
+            await el.click().catch(() => {});
+            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            await sleep(randomDelay(1000, 2000));
+            return page.url();
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
   async runSession(articles, config = {}) {
     this.status = 'running';
     this.log('info', `Session starting: ${articles.length} articles`);
     const articleDelay = config.articleDelay || 30;
+    const useNextPost = config.useNextPost === true;
     const results = [];
+
+    // Keep last active page for "next post" navigation
+    let activePage = null;
 
     for (let i = 0; i < articles.length; i++) {
       const article = articles[i];
       this.log('info', `[${i + 1}/${articles.length}] ${article.title}`);
 
-      const result = await this.readArticle(article.url, article.title, config);
+      let result;
+      // From 2nd article onwards, try "next post" click on the existing page first
+      if (useNextPost && i > 0 && activePage) {
+        try {
+          this.log('info', `Trying "next post" navigation for article ${i + 1}...`);
+          const nextUrl = await this._clickNextPost(activePage);
+          if (nextUrl && nextUrl !== 'about:blank') {
+            this.log('info', `Navigated via next post → ${nextUrl}`);
+            // Read the page we're already on (no new tab needed)
+            this.currentArticle = article.title;
+            this.status = 'reading';
+            const readTimeMin = (config.readTimeMin || 30) * 1000;
+            const readTimeMax = (config.readTimeMax || 300) * 1000;
+            const readTime = randomDelay(readTimeMin, readTimeMax);
+            await sleep(randomDelay(1000, 2000));
+            await butterSmoothScroll(activePage, readTime, config, this.scrollProfile);
+            if (Math.random() < 0.3) {
+              await activePage.mouse.wheel(0, -randomDelay(100, 300)).catch(() => {});
+              await sleep(randomDelay(1000, 2000));
+            }
+            const dwellSeconds = Math.round(readTime / 1000);
+            this.articlesRead++;
+            this.totalDwellTime += dwellSeconds;
+            this.log('success', `Read via next-post: "${article.title}" (${dwellSeconds}s, internal)`);
+            result = { dwellTime: dwellSeconds, trafficSource: 'internal' };
+          } else {
+            // Next post not found — fallback to direct
+            this.log('warn', `No next post link found, falling back to direct for: ${article.title}`);
+            result = await this.readArticle(article.url, article.title, { ...config, trafficPreference: 'direct' });
+          }
+        } catch (err) {
+          this.log('warn', `Next post nav error: ${err.message} — falling back to direct`);
+          result = await this.readArticle(article.url, article.title, { ...config, trafficPreference: 'direct' });
+        }
+      } else {
+        const readConfig = useNextPost ? { ...config, keepPageOpen: true } : config;
+        result = await this.readArticle(article.url, article.title, readConfig);
+        // Keep the page open for next-post navigation on subsequent articles
+        if (useNextPost && result && result.page) {
+          activePage = result.page;
+        }
+      }
+
       results.push({ article, result });
 
       // Delay between articles
