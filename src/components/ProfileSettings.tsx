@@ -56,6 +56,9 @@ function loadProfileConfig(profileId: string): ProfileConfig {
 
 function saveProfileConfig(profileId: string, config: ProfileConfig) {
   try { localStorage.setItem(`mmb_profile_config_${profileId}`, JSON.stringify(config)); } catch {}
+  void import('../utils/appDataApi').then(({ saveProfileConfigToServer }) => {
+    saveProfileConfigToServer(profileId, config);
+  });
 }
 
 function getDefaultConfig(): ProfileConfig {

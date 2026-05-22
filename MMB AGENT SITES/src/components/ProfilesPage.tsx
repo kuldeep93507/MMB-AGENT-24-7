@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { Plus, CheckSquare, Square, Play, StopCircle, Search, RefreshCw } from 'lucide-react';
-import type { Profile, OS } from '../types';
+import type { Profile, OS, MultiloginProxyType } from '../types';
 import ProfileCard from './ProfileCard';
 import NewProfileModal from './NewProfileModal';
 import { useStore } from '../store/useStore';
+import type { ProviderSelection } from '../services/browserProviderApi';
 
 type BrowserProvider = 'morelogin' | 'adspower' | 'multilogin';
-type ProviderSelection = BrowserProvider | 'all';
 
 const PROVIDER_LABELS: Record<ProviderSelection, string> = {
   all: 'All Providers',
@@ -19,7 +19,7 @@ interface ProfilesPageProps {
   profiles: Profile[];
   loading: boolean;
   onFetchProfiles: () => void;
-  onCreateProfile: (os: OS) => void;
+  onCreateProfile: (os: OS, proxyType?: MultiloginProxyType) => void;
   onStartProfile: (id: string) => void;
   onStopProfile: (id: string) => void;
   onDeleteProfile: (id: string) => void;
@@ -30,7 +30,7 @@ interface ProfilesPageProps {
   onStartSelected: () => void;
   onStopSelected: () => void;
   onRenewProxy: (id: string) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (id: string) => void;
 }
 
 export default function ProfilesPage({
@@ -46,6 +46,7 @@ export default function ProfilesPage({
   const [filterProvider, setFilterProvider] = useState<'All' | BrowserProvider>('All');
 
   const browserProvider = useStore((state) => state.browserProvider);
+  const setBrowserProvider = useStore((state) => state.setBrowserProvider);
   const selectedCount = profiles.filter(p => p.selected).length;
   const runningCount = profiles.filter(p => p.status === 'running').length;
 
@@ -127,6 +128,24 @@ export default function ProfilesPage({
           </div>
         </div>
 
+        {/* Provider Quick-Switch */}
+        <div className="flex items-center gap-1.5 mb-3 flex-wrap">
+          <span className="text-gray-500 text-xs font-medium mr-1">Provider:</span>
+          {(['morelogin', 'adspower', 'multilogin', 'all'] as ProviderSelection[]).map(p => (
+            <button key={p} onClick={() => setBrowserProvider(p)}
+              className={`px-3 py-1 rounded-lg border text-xs font-semibold transition-all
+                ${browserProvider === p
+                  ? p === 'morelogin'  ? 'bg-blue-600/30 border-blue-500/60 text-blue-300'
+                  : p === 'adspower'  ? 'bg-emerald-600/30 border-emerald-500/60 text-emerald-300'
+                  : p === 'multilogin' ? 'bg-purple-600/30 border-purple-500/60 text-purple-300'
+                  : 'bg-cyan-600/30 border-cyan-500/60 text-cyan-300'
+                  : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600'}`}>
+              {PROVIDER_LABELS[p]}
+            </button>
+          ))}
+          {loading && <span className="text-blue-400 text-xs ml-1">⟳ fetching...</span>}
+        </div>
+
         {/* Action Buttons Row */}
         <div className="flex items-center gap-2 flex-wrap">
           <button onClick={onSelectAll}
@@ -201,7 +220,7 @@ export default function ProfilesPage({
         {loading && profiles.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64">
             <RefreshCw size={32} className="text-green-400 animate-spin mb-4" />
-            <p className="text-gray-400 text-sm">Fetching profiles from MoreLogin...</p>
+            <p className="text-gray-400 text-sm">Fetching profiles from {browserProvider ? PROVIDER_LABELS[browserProvider] : 'provider'}...</p>
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-64">
@@ -211,7 +230,7 @@ export default function ProfilesPage({
             </h3>
             <p className="text-gray-600 text-sm mb-6">
               {profiles.length === 0
-                ? 'Make sure MoreLogin is running, then click Refresh or "New Profile"'
+                ? `Make sure ${browserProvider ? PROVIDER_LABELS[browserProvider] : 'the browser provider'} is running, then click Refresh or "New Profile"`
                 : 'Try adjusting your search or filters'}
             </p>
             {profiles.length === 0 && (
@@ -250,7 +269,7 @@ export default function ProfilesPage({
       {showNewModal && (
         <NewProfileModal
           onClose={() => setShowNewModal(false)}
-          onCreate={(os) => { onCreateProfile(os); setShowNewModal(false); }}
+          onCreate={(os, proxyType) => { onCreateProfile(os, proxyType); setShowNewModal(false); }}
         />
       )}
     </div>

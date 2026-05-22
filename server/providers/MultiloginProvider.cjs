@@ -40,7 +40,7 @@ const TOKEN_EXPIRY_MS = 30 * 60 * 1000;       // 30 minutes actual expiry
 const TOKEN_REFRESH_MS = 25 * 60 * 1000;       // Refresh proactively at 25 minutes
 
 // Timeout configuration
-const DEFAULT_TIMEOUT = 10000;  // 10s for standard requests
+const DEFAULT_TIMEOUT = 25000;  // 25s for standard requests (proxy gen can be slow)
 const START_TIMEOUT = 30000;    // 30s for browser start operations
 const STOP_TIMEOUT = 15000;     // 15s for browser stop operations
 
@@ -626,6 +626,22 @@ class MultiloginProvider extends BrowserProvider {
    */
   async _resolveProxy(proxyOptions, apiFormat = 'cloud') {
     if (!proxyOptions) return { success: true, proxy: null };
+
+    // SmartProxy — read credentials from .env (PROXY_SERVER, PROXY_PORT, PROXY_PREFIX, PROXY_PASSWORD)
+    if (proxyOptions.type === 'smartproxy') {
+      const server   = process.env.PROXY_SERVER   || 'us.smartproxy.net';
+      const port     = parseInt(process.env.PROXY_PORT || '3120', 10);
+      const prefix   = process.env.PROXY_PREFIX   || '';
+      const password = process.env.PROXY_PASSWORD  || '';
+      const sessionId = Math.random().toString(36).slice(2, 12);
+      const country  = proxyOptions.country || 'us';
+      const username = `${prefix}_country-${country}_session-${sessionId}`;
+      console.log(`[multilogin] Using SmartProxy: ${server}:${port}`);
+      if (apiFormat === 'quick') {
+        return { success: true, proxy: { host: server, port, username, password, type: 'http' } };
+      }
+      return { success: true, proxy: { host: server, port, username, password, type: 'HTTP' } };
+    }
 
     // Multilogin residential proxy — generate credentials first
     if (proxyOptions.type === 'multilogin_residential') {

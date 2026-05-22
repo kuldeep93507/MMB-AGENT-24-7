@@ -148,8 +148,10 @@ export default function AnalyticsPage({ profiles }: AnalyticsPageProps) {
     (liveData?.trafficGoogle || 0) +
     (liveData?.trafficBing || 0) +
     (liveData?.trafficDirect || 0) +
+    (liveData?.trafficDirectFallback || 0) +
     (liveData?.trafficChannel || 0) +
-    (liveData?.trafficBacklink || 0);
+    (liveData?.trafficBacklink || 0) +
+    (liveData?.trafficBacklinkFallback || 0);
 
   return (
     <div className="flex flex-col h-full">
@@ -250,8 +252,10 @@ export default function AnalyticsPage({ profiles }: AnalyticsPageProps) {
               <TrafficBar label="Google" count={liveData?.trafficGoogle ?? 0} total={trafficTotal} color="bg-blue-500" />
               <TrafficBar label="Bing" count={liveData?.trafficBing ?? 0} total={trafficTotal} color="bg-teal-500" />
               <TrafficBar label="Direct" count={liveData?.trafficDirect ?? 0} total={trafficTotal} color="bg-gray-400" />
+              <TrafficBar label="Search failed→URL" count={liveData?.trafficDirectFallback ?? 0} total={trafficTotal} color="bg-amber-600" />
               <TrafficBar label="Channel" count={liveData?.trafficChannel ?? 0} total={trafficTotal} color="bg-purple-500" />
               <TrafficBar label="Backlink" count={liveData?.trafficBacklink ?? 0} total={trafficTotal} color="bg-orange-500" />
+              <TrafficBar label="Backlink fallback" count={liveData?.trafficBacklinkFallback ?? 0} total={trafficTotal} color="bg-amber-800" />
             </div>
           </div>
         )}

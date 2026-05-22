@@ -66,6 +66,8 @@ export default function LogsPage({ profiles, onClear }: LogsPageProps) {
     }
   }, [filter, sourceFilter, profileFilter, search]);
 
+  const displayEntries = useMemo(() => [...entries].reverse(), [entries]);
+
   useEffect(() => {
     refresh();
     const interval = setInterval(refresh, 3000);
@@ -79,8 +81,6 @@ export default function LogsPage({ profiles, onClear }: LogsPageProps) {
       el.scrollTop = el.scrollHeight;
     });
   }, [displayEntries, autoScroll]);
-
-  const displayEntries = useMemo(() => [...entries].reverse(), [entries]);
 
   const counts = useMemo(() => {
     const c = { info: 0, warn: 0, error: 0, success: 0 };

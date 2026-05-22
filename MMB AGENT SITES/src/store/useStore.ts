@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Profile, Job, LogEntry, OS, TaskType, ProfileSiteSettings, ReadHistory, RateLimitConfig } from '../types';
+import type { Profile, Job, LogEntry, OS, TaskType, ProfileSiteSettings, ReadHistory, RateLimitConfig, MultiloginProxyType } from '../types';
 import * as moreloginApi from '../services/moreloginApi';
 import {
   listProfiles as listProviderProfiles,
@@ -86,7 +86,7 @@ interface StoreState {
   setActiveTab: (tab: string) => void;
   setBrowserProvider: (provider: ProviderSelection) => Promise<void>;
   fetchProfiles: () => Promise<void>;
-  createProfile: (os: OS) => Promise<void>;
+  createProfile: (os: OS, proxyType?: MultiloginProxyType) => Promise<void>;
   startProfile: (profileId: string) => Promise<void>;
   stopProfile: (profileId: string) => Promise<void>;
   deleteProfile: (profileId: string) => Promise<void>;
@@ -120,7 +120,7 @@ export const useStore = create<StoreState>()(
       loading: false,
       browserProvider: (() => {
         try {
-          const stored = localStorage.getItem('mmb_browser_provider');
+          const stored = localStorage.getItem('mmb_sites_browser_provider') || localStorage.getItem('mmb_browser_provider');
           if (stored === 'morelogin' || stored === 'adspower' || stored === 'multilogin' || stored === 'all') {
             return stored;
           }
@@ -133,7 +133,7 @@ export const useStore = create<StoreState>()(
       // ============ SET BROWSER PROVIDER ============
       setBrowserProvider: async (provider) => {
         set({ browserProvider: provider, profiles: [], loading: true });
-        try { localStorage.setItem('mmb_browser_provider', provider); } catch {}
+        try { localStorage.setItem('mmb_sites_browser_provider', provider); } catch {}
         await get().fetchProfiles();
       },
 
@@ -185,6 +185,16 @@ export const useStore = create<StoreState>()(
               };
             });
 
+            // Auto-switch provider when all profiles belong to a single provider
+            // that doesn't match the current selection — fixes stale localStorage state
+            if (provider !== 'all' && mapped.length > 0) {
+              const detectedType = mapped[0].browserType;
+              if (detectedType && detectedType !== provider) {
+                set({ browserProvider: detectedType });
+                try { localStorage.setItem('mmb_sites_browser_provider', detectedType); } catch {}
+              }
+            }
+
             // Surface per-provider errors when in "all" mode
             if (provider === 'all' && 'errors' in res.data && Array.isArray((res.data as any).errors)) {
               for (const e of (res.data as any).errors as Array<{ provider: string; message: string }>) {
@@ -212,6 +222,9 @@ export const useStore = create<StoreState>()(
                 startDelayMin: 5,
                 startDelayMax: 30,
                 sessionLimit: 7,
+                multiPageSession: true,
+                useNextPost: true,
+                multiloginPort: undefined,
               }));
 
             const newLimits = mapped
@@ -245,7 +258,7 @@ export const useStore = create<StoreState>()(
       },
 
       // ============ CREATE PROFILE — routes via the active provider ============
-      createProfile: async (os) => {
+      createProfile: async (os, proxyType) => {
         const current = get().browserProvider;
         const provider: BrowserProvider = current === 'all' ? 'morelogin' : current;
         get().addLog('info', `Creating new ${os} profile via ${provider}...`);
@@ -265,11 +278,19 @@ export const useStore = create<StoreState>()(
             return;
           }
 
-          // AdsPower / Multilogin
+          // AdsPower / Multilogin — build proxy config from proxyType
           const osLower = os.toLowerCase() as 'windows' | 'macos' | 'android';
+
+          let proxyConfig: any = undefined;
+          if (provider === 'multilogin' && proxyType && proxyType !== 'none') {
+            proxyConfig = { type: proxyType, country: 'us' };
+            get().addLog('info', `Proxy type: ${proxyType}`);
+          }
+
           const res = await createProviderProfile(provider, {
             name: `Profile-${Date.now().toString(36)}`,
             os: osLower,
+            proxy: proxyConfig ?? null,
           });
           if (res.code === 0 && res.data) {
             const newId = (res.data as { profileId?: string; id?: string }).profileId

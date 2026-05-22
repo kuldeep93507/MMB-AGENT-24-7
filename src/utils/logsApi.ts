@@ -1,4 +1,4 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendUrl, getAuthHeaders } from '../services/backendOrigin';
 import type { LogEntry, LogLevel, LogSource } from '../types';
 
 export interface FetchLogsParams {
@@ -51,7 +51,7 @@ export async function postActivityLog(
 
 export async function clearActivityLogs(): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/logs'), { method: 'DELETE' });
+    const res = await fetch(backendUrl('/api/logs'), { method: 'DELETE', headers: getAuthHeaders() });
     return res.ok;
   } catch {
     return false;

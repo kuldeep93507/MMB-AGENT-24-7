@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { fetchChannelFromRSS, fetchPlaylistVideos } from '../services/youtubeApi';
 import type { YouTubeVideo } from '../services/youtubeApi';
 import { PERMANENT_CHANNEL_IDS, isPermanentChannel } from '../data/defaultChannels';
+import { hydrateChannelsFromServer, saveChannelsBundleToServer } from '../utils/appDataApi';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Types
@@ -132,11 +133,26 @@ export function useChannelStore() {
   const [videos, setVideos] = useState<Video[]>(() => loadFromStorage('mmb_videos', []));
   const [playlists, setPlaylists] = useState<Playlist[]>(() => loadFromStorage('mmb_playlists', []));
   const [toasts, setToasts] = useState<{ id: string; message: string; type: 'success' | 'error' | 'info' }[]>([]);
+  const serverSyncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Persist to localStorage on change
+  useEffect(() => {
+    void hydrateChannelsFromServer();
+  }, []);
+
+  // Persist to localStorage + server on change
   useEffect(() => { saveToStorage('mmb_channels', channels); }, [channels]);
   useEffect(() => { saveToStorage('mmb_videos', videos); }, [videos]);
   useEffect(() => { saveToStorage('mmb_playlists', playlists); }, [playlists]);
+
+  useEffect(() => {
+    if (serverSyncTimer.current) clearTimeout(serverSyncTimer.current);
+    serverSyncTimer.current = setTimeout(() => {
+      void saveChannelsBundleToServer({ channels, videos, playlists });
+    }, 1200);
+    return () => {
+      if (serverSyncTimer.current) clearTimeout(serverSyncTimer.current);
+    };
+  }, [channels, videos, playlists]);
 
   const permanentSeedInFlight = useRef(false);
 

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Sidebar from './components/Sidebar';
 import TopBar from './components/TopBar';
 import Dashboard from './components/Dashboard';
@@ -20,6 +20,7 @@ import { useSiteStore } from './store/useSiteStore';
 export default function App() {
   const store = useStore();
   const siteStore = useSiteStore();
+  const [settingsProfileId, setSettingsProfileId] = useState<string | undefined>(undefined);
 
   // Auto-seed default sites on first launch + fetch profiles on mount
   useEffect(() => {
@@ -57,7 +58,7 @@ export default function App() {
             onStartSelected={store.startSelected}
             onStopSelected={store.stopSelected}
             onRenewProxy={store.renewProxy}
-            onOpenSettings={() => store.setActiveTab('profile-settings')}
+            onOpenSettings={(id) => { setSettingsProfileId(id); store.setActiveTab('profile-settings'); }}
           />
         );
       case 'sites':
@@ -87,7 +88,7 @@ export default function App() {
       case 'comments':
         return <CommentTemplatesPage />;
       case 'profile-settings':
-        return <ProfileSettingsPage profiles={store.profiles} profileSettings={store.profileSettings} updateProfileSettings={store.updateProfileSettings} />;
+        return <ProfileSettingsPage profiles={store.profiles} profileSettings={store.profileSettings} updateProfileSettings={store.updateProfileSettings} initialProfileId={settingsProfileId} />;
       case 'proxy-health':
         return <ProxyHealthPage profiles={store.profiles} onRenewProxy={store.renewProxy} />;
       case 'logs':

@@ -18,7 +18,7 @@ import {
   exportSettingsJson,
   parseSettingsImport,
 } from '../utils/settingsApi';
-import { backendUrl } from '../services/backendOrigin';
+import { backendUrl, getAuthHeaders } from '../services/backendOrigin';
 
 const PROVIDER_INFO: Record<BrowserProvider, { label: string; connection: string }> = {
   morelogin: { label: 'MoreLogin', connection: 'localhost:40000' },
@@ -521,7 +521,7 @@ function GitPushSection() {
     try {
       const res = await fetch(backendUrl('/api/update/push'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ version, changelog: changelog.split('\n').filter((l) => l.trim()) }),
       });
       const data = await res.json();

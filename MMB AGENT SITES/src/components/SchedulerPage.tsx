@@ -196,7 +196,7 @@ export default function SchedulerPage({ profiles, sites }: SchedulerPageProps) {
   const buildPayload = useCallback((schedule: Schedule) => {
     const resolvedArticles = sites
       .filter(site => schedule.selectedSites.includes(site.id))
-      .flatMap(site => site.articles.filter(a => a.enabled).map(a => ({ url: a.url, title: a.title })));
+      .flatMap(site => site.articles.filter(a => a.enabled).map(a => ({ url: a.url, title: a.title, siteUrl: site.url })));
     return { ...schedule, resolvedArticles };
   }, [sites]);
 

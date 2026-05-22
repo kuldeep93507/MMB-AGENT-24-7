@@ -1,16 +1,34 @@
 import { useState } from 'react';
 import { X, Monitor, Smartphone, Apple, Zap, ChevronRight } from 'lucide-react';
-import type { OS } from '../types';
+import type { OS, MultiloginProxyType } from '../types';
+import { useStore } from '../store/useStore';
+
+const PROVIDER_LABELS: Record<string, string> = {
+  morelogin: 'MoreLogin',
+  adspower: 'AdsPower',
+  multilogin: 'Multilogin',
+  all: 'Active Provider',
+};
 
 interface NewProfileModalProps {
   onClose: () => void;
-  onCreate: (os: OS) => void;
+  onCreate: (os: OS, proxyType?: MultiloginProxyType) => void;
 }
 
 export default function NewProfileModal({ onClose, onCreate }: NewProfileModalProps) {
   const [selectedOS, setSelectedOS] = useState<OS | null>(null);
+  const [selectedProxy, setSelectedProxy] = useState<MultiloginProxyType>('multilogin_residential');
   const [creating, setCreating] = useState(false);
   const [stepLogs, setStepLogs] = useState<string[]>([]);
+  const browserProvider = useStore(s => s.browserProvider);
+  const providerLabel = PROVIDER_LABELS[browserProvider] ?? 'Provider';
+  const isMultilogin = browserProvider === 'multilogin';
+
+  const PROXY_OPTIONS: { value: MultiloginProxyType; label: string; desc: string; icon: string }[] = [
+    { value: 'multilogin_residential', label: 'Multilogin Residential', desc: 'Auto-generated US residential IP via Multilogin proxy pool', icon: '🌐' },
+    { value: 'smartproxy',             label: 'SmartProxy',             desc: 'Use SmartProxy credentials from your .env config',         icon: '🔗' },
+    { value: 'none',                   label: 'No Proxy',               desc: 'Direct connection — no proxy assigned to this profile',    icon: '⚡' },
+  ];
 
   const OS_OPTIONS: { os: OS; icon: React.ReactNode; desc: string; color: string }[] = [
     { os: 'Windows', icon: <Monitor size={28} />, desc: 'Desktop fingerprint — Chrome on Windows 10/11. Best for blog reading.', color: 'blue' },
@@ -33,10 +51,10 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
     if (!selectedOS) return;
     setCreating(true);
     const steps = [
-      { delay: 300, msg: '✅ Step 1: OS Selected — ' + selectedOS },
-      { delay: 700, msg: '⚙️  Step 2: Generating US state + city + session ID...' },
-      { delay: 1200, msg: '🔗  Step 3: Building proxy username (smart-pwgbkxcy3lyi_area-US_state-XX_city-YYY_life-4hr_session-xxxxx)' },
-      { delay: 1800, msg: '📡  Step 4: MoreLogin API — POST /api/env/create/quick...' },
+      { delay: 300,  msg: `✅ Step 1: OS Selected — ${selectedOS}` },
+      { delay: 700,  msg: '⚙️  Step 2: Generating US state + city + session ID...' },
+      { delay: 1200, msg: '🔗  Step 3: Building proxy config...' },
+      { delay: 1800, msg: `📡  Step 4: ${providerLabel} API — creating profile...` },
       { delay: 2400, msg: '🚀  Step 5: Assigning unique IP + fingerprint...' },
       { delay: 3000, msg: '💾  Step 6: Profile saved — ready for article reading' },
       { delay: 3500, msg: '✅  Profile created successfully!' },
@@ -45,7 +63,7 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
       setTimeout(() => {
         setStepLogs(prev => [...prev, msg]);
         if (delay === 3500) {
-          setTimeout(() => { onCreate(selectedOS); onClose(); }, 400);
+          setTimeout(() => { onCreate(selectedOS, isMultilogin ? selectedProxy : undefined); onClose(); }, 400);
         }
       }, delay);
     });
@@ -58,7 +76,7 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
           <div>
             <h2 className="text-white font-bold text-lg">Create New Profile</h2>
             <p className="text-gray-500 text-xs mt-0.5">
-              {!creating ? 'Choose OS — rest is automatic via MoreLogin API' : 'Auto-creating profile...'}
+              {!creating ? `Choose OS — rest is automatic via ${providerLabel} API` : 'Auto-creating profile...'}
             </p>
           </div>
           {!creating && <button onClick={onClose} className="text-gray-500 hover:text-gray-300"><X size={20} /></button>}
@@ -69,7 +87,7 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
             <>
               <p className="text-gray-400 text-sm mb-4 bg-gray-800/60 border border-gray-700 rounded-xl p-3">
                 <span className="text-yellow-400 font-medium">👤 Your only task:</span> Choose an OS below.
-                Proxy, fingerprint, MoreLogin setup — all automatic.
+                Proxy, fingerprint, {providerLabel} setup — all automatic.
               </p>
               <div className="space-y-3">
                 {OS_OPTIONS.map(({ os, icon, desc, color }) => {
@@ -89,6 +107,29 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
                   );
                 })}
               </div>
+              {/* Proxy picker — only for Multilogin */}
+              {isMultilogin && (
+                <div className="mt-4">
+                  <p className="text-gray-400 text-xs mb-2 font-medium">Select Proxy Type</p>
+                  <div className="space-y-2">
+                    {PROXY_OPTIONS.map(opt => (
+                      <button key={opt.value} onClick={() => setSelectedProxy(opt.value)}
+                        className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-all text-left
+                          ${selectedProxy === opt.value
+                            ? 'border-purple-500/60 bg-purple-900/20 ring-1 ring-purple-500/30'
+                            : 'border-gray-700 bg-gray-800/40 hover:border-gray-600'}`}>
+                        <span className="text-xl flex-shrink-0">{opt.icon}</span>
+                        <div>
+                          <div className={`text-sm font-semibold ${selectedProxy === opt.value ? 'text-purple-300' : 'text-gray-300'}`}>{opt.label}</div>
+                          <div className="text-xs text-gray-500 mt-0.5">{opt.desc}</div>
+                        </div>
+                        {selectedProxy === opt.value && <div className="ml-auto w-2 h-2 rounded-full bg-purple-400 flex-shrink-0" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="mt-6 flex gap-3">
                 <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-xl border border-gray-700 text-gray-400 hover:text-gray-200 text-sm font-medium">Cancel</button>
                 <button onClick={handleCreate} disabled={!selectedOS}

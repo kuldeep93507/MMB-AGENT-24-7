@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Plus, Trash2, Copy, Shuffle, MessageSquare } from 'lucide-react';
+import { hydrateCommentsFromServer, saveCommentsToServer } from '../utils/appDataApi';
 
 interface CommentTemplate {
   id: string;
@@ -17,10 +18,27 @@ export default function CommentTemplatesPage() {
   const [filterCategory, setFilterCategory] = useState('all');
   const [bulkMode, setBulkMode] = useState(false);
   const [bulkText, setBulkText] = useState('');
+  const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Persist
+  useEffect(() => {
+    void hydrateCommentsFromServer().then(() => {
+      try {
+        const d = localStorage.getItem('mmb_comments');
+        if (d) setTemplates(JSON.parse(d));
+      } catch { /* ignore */ }
+    });
+  }, []);
+
+  // Persist locally + server
   useEffect(() => {
     try { localStorage.setItem('mmb_comments', JSON.stringify(templates)); } catch {}
+    if (syncTimer.current) clearTimeout(syncTimer.current);
+    syncTimer.current = setTimeout(() => {
+      void saveCommentsToServer(templates);
+    }, 800);
+    return () => {
+      if (syncTimer.current) clearTimeout(syncTimer.current);
+    };
   }, [templates]);
 
   const categories = ['general', 'positive', 'question', 'engagement', 'custom'];

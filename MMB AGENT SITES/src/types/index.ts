@@ -1,9 +1,10 @@
 export type OS = 'Windows' | 'Android' | 'macOS';
+export type MultiloginProxyType = 'multilogin_residential' | 'smartproxy' | 'none';
 export type ProfileStatus = 'running' | 'stopped' | 'starting' | 'error' | 'recreating';
 export type ProxyLife = '1hr' | '2hr' | '4hr' | '8hr' | '24hr';
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed';
 export type TaskType = 'read_article' | 'comment' | 'search_google' | 'internal_nav' | 'backlink_visit' | 'idle';
-export type TrafficSource = 'google' | 'direct' | 'internal' | 'backlink' | 'random';
+export type TrafficSource = 'google' | 'bing' | 'duckduckgo' | 'yahoo' | 'direct' | 'internal' | 'backlink' | 'random';
 export type ScrollSpeed = 'slow' | 'medium' | 'fast';
 export type SyncInterval = '1hr' | '6hr' | '12hr' | 'daily' | 'manual';
 
@@ -96,6 +97,9 @@ export interface ProfileSiteSettings {
   startDelayMin: number; // seconds
   startDelayMax: number; // seconds
   sessionLimit: number; // max articles per session
+  multiPageSession: boolean; // visit multiple articles per browser session
+  useNextPost: boolean; // use next-post navigation links between articles
+  multiloginPort?: number; // override CDP port for already-running Multilogin profile
 }
 
 export interface ReadHistory {

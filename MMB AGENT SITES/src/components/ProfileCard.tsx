@@ -38,10 +38,11 @@ export default function ProfileCard({ profile, onStart, onStop, onSettings, onDe
   const status = STATUS_CONFIG[profile.status];
   const osConf = OS_CONFIG[profile.os];
   const providerConf = profile.browserType ? PROVIDER_CONFIG[profile.browserType] : null;
+  const isMorelogin = !profile.browserType || profile.browserType === 'morelogin';
 
-  const timeLeft = profile.proxy.expiresAt - Date.now();
+  const timeLeft = profile.proxy.expiresAt ? profile.proxy.expiresAt - Date.now() : -1;
   const isExpired = timeLeft <= 0;
-  const timeLeftStr = isExpired ? 'Expired' : formatTime(timeLeft);
+  const timeLeftStr = !isMorelogin ? '—' : isExpired ? 'Expired' : formatTime(timeLeft);
 
   function formatTime(ms: number) {
     const h = Math.floor(ms / 3600000);
@@ -103,7 +104,10 @@ export default function ProfileCard({ profile, onStart, onStop, onSettings, onDe
 
         <div className="bg-gray-800/60 rounded-lg px-3 py-1.5">
           <div className="text-gray-600 text-xs truncate font-mono">
-            session: <span className="text-gray-400">{profile.proxy.sessionId}</span> • life: <span className="text-gray-400">{profile.proxy.life}</span>
+            {isMorelogin
+              ? <>session: <span className="text-gray-400">{profile.proxy.sessionId || '—'}</span> • life: <span className="text-gray-400">{profile.proxy.life || '—'}</span></>
+              : <span className="text-gray-500">Proxy managed by {providerConf?.label ?? 'provider'}</span>
+            }
           </div>
         </div>
 

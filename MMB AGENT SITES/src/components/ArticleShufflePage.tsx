@@ -13,11 +13,21 @@ import { useStore } from '../store/useStore';
 type TrafficSource = 'random' | 'google' | 'direct' | 'internal' | 'bing' | 'duckduckgo' | 'yahoo' | 'backlinks';
 type ScrollSpeed  = 'slow' | 'medium' | 'fast';
 
+interface ReadingPattern {
+  scrollSpeed: ScrollSpeed;
+  dwellMin: number;        // seconds before first scroll
+  dwellMax: number;        // max dwell before moving on
+  pauseChance: number;     // 0–1: probability of mid-scroll pause
+  chunkPx: number;         // px per scroll step
+  useNextPost: boolean;    // click website's next-post button at bottom
+}
+
 interface ShuffleAssignment {
   profileId: string;
   profileName: string;
   articles: Article[];
   hasRepeats: boolean; // true = pool was exhausted, older articles recycled
+  readingPattern: ReadingPattern;
 }
 
 interface ProgressEntry {
@@ -38,6 +48,21 @@ const TRAFFIC_SOURCES: { value: TrafficSource; label: string; icon: string }[] =
 ];
 
 function genId() { return Math.random().toString(36).slice(2, 11) + Date.now().toString(36); }
+
+function genReadingPattern(base: ScrollSpeed, useNextPost: boolean): ReadingPattern {
+  const speeds: ScrollSpeed[] = ['slow', 'medium', 'fast'];
+  // Allow some drift from the base speed so each profile feels different
+  const drift = Math.floor(Math.random() * 3);
+  const speed = speeds[drift] as ScrollSpeed;
+  return {
+    scrollSpeed: speed,
+    dwellMin:    Math.floor(Math.random() * 20) + 8,      // 8–28s before first scroll
+    dwellMax:    Math.floor(Math.random() * 60) + 40,     // 40–100s max dwell
+    pauseChance: parseFloat((0.15 + Math.random() * 0.45).toFixed(2)), // 15–60% pause chance
+    chunkPx:     Math.floor(Math.random() * 220) + 80,   // 80–300px per scroll step
+    useNextPost,
+  };
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Component
@@ -62,6 +87,9 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
   const [articleDelayMax, setArticleDelayMax]  = useState(60);
   const [minPerProfile,   setMinPerProfile]    = useState(2);
   const [maxPerProfile,   setMaxPerProfile]    = useState(5);
+  const [oneArticleMode,  setOneArticleMode]   = useState(false);
+  const [uniquePatterns,  setUniquePatterns]   = useState(true);
+  const [useNextPost,     setUseNextPost]      = useState(true);
   const [settingsOpen,    setSettingsOpen]     = useState(true);
 
   const [assignments,     setAssignments]      = useState<ShuffleAssignment[]>([]);
@@ -130,6 +158,8 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
     profile: Profile,
     usedUrls: Set<string>,
     markUsed: boolean,
+    overrideMin?: number,
+    overrideMax?: number,
   ): { articles: Article[]; hasRepeats: boolean } => {
     const profileReadUrls = new Set(
       recentHistory.filter(r => r.profileId === profile.id).map(r => r.articleUrl)
@@ -137,8 +167,10 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
 
     // Fresh: not read by this profile AND not used by another profile in this run
     const fresh = availableArticles.filter(a => !profileReadUrls.has(a.url) && !usedUrls.has(a.url));
+    const lo = overrideMin ?? minPerProfile;
+    const hi = overrideMax ?? maxPerProfile;
     const count = Math.min(
-      Math.floor(Math.random() * (maxPerProfile - minPerProfile + 1)) + minPerProfile,
+      Math.floor(Math.random() * (hi - lo + 1)) + lo,
       availableArticles.length,
     );
 
@@ -171,17 +203,26 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
       : profiles;
     if (targetProfiles.length === 0 || availableArticles.length === 0) return;
 
+    const effectiveMin = oneArticleMode ? 1 : minPerProfile;
+    const effectiveMax = oneArticleMode ? 1 : maxPerProfile;
+
     const usedUrls = new Set<string>();
     const result: ShuffleAssignment[] = targetProfiles.map(profile => {
-      const { articles, hasRepeats } = shuffleForProfile(profile, usedUrls, true);
-      return { profileId: profile.id, profileName: profile.name, articles, hasRepeats };
+      const { articles, hasRepeats } = shuffleForProfile(
+        profile, usedUrls, true,
+        effectiveMin, effectiveMax,
+      );
+      const readingPattern = uniquePatterns
+        ? genReadingPattern(scrollSpeed, useNextPost)
+        : { scrollSpeed, dwellMin: 10, dwellMax: 60, pauseChance: 0.3, chunkPx: 150, useNextPost };
+      return { profileId: profile.id, profileName: profile.name, articles, hasRepeats, readingPattern };
     });
     setAssignments(result);
     setRunStatus('idle');
     setProgress([]);
   };
 
-  // ── Fix #10: Per-profile re-shuffle
+  // ── Per-profile re-shuffle
   const reshuffleProfile = (profileId: string) => {
     const otherUrls = new Set<string>(
       assignments
@@ -190,9 +231,14 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
     );
     const profile = profiles.find(p => p.id === profileId);
     if (!profile) return;
-    const { articles, hasRepeats } = shuffleForProfile(profile, otherUrls, false);
+    const lo = oneArticleMode ? 1 : minPerProfile;
+    const hi = oneArticleMode ? 1 : maxPerProfile;
+    const { articles, hasRepeats } = shuffleForProfile(profile, otherUrls, false, lo, hi);
+    const readingPattern = uniquePatterns
+      ? genReadingPattern(scrollSpeed, useNextPost)
+      : { scrollSpeed, dwellMin: 10, dwellMax: 60, pauseChance: 0.3, chunkPx: 150, useNextPost };
     setAssignments(prev =>
-      prev.map(a => a.profileId === profileId ? { ...a, articles, hasRepeats } : a)
+      prev.map(a => a.profileId === profileId ? { ...a, articles, hasRepeats, readingPattern } : a)
     );
   };
 
@@ -222,16 +268,18 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
         body: JSON.stringify({
           id,
           name: 'Article Shuffle Run',
-          provider: browserProvider || 'morelogin', // fix #3
-          trafficSource,                             // fix #1
-          readTimeMin,                               // fix #4
+          provider: browserProvider || 'morelogin',
+          trafficSource,
+          readTimeMin,
           readTimeMax,
           scrollSpeed,
           articleDelayMin,
           articleDelayMax,
+          useNextPost,
           assignments: assignments.map(a => ({
-            profileId: a.profileId,
-            articles:  a.articles.map(art => ({ url: art.url, title: art.title })),
+            profileId:      a.profileId,
+            articles:       a.articles.map(art => ({ url: art.url, title: art.title })),
+            readingPattern: a.readingPattern,
           })),
         }),
       });
@@ -418,18 +466,39 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
 
           {settingsOpen && (
             <div className="px-4 pb-4 space-y-4 border-t border-gray-800">
-              {/* Articles per profile */}
-              <div className="flex items-center gap-6 pt-3">
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-400 text-xs">Min articles/profile:</span>
-                  <input type="number" value={minPerProfile} onChange={e => setMinPerProfile(Number(e.target.value))} min={1} max={50}
-                    className="w-14 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-white text-xs text-center outline-none focus:border-green-500" />
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-400 text-xs">Max articles/profile:</span>
-                  <input type="number" value={maxPerProfile} onChange={e => setMaxPerProfile(Number(e.target.value))} min={1} max={50}
-                    className="w-14 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-white text-xs text-center outline-none focus:border-green-500" />
-                </div>
+
+              {/* Mode toggle row */}
+              <div className="flex items-center gap-3 pt-3 flex-wrap">
+                {/* 1 article per profile mode */}
+                <button onClick={() => setOneArticleMode(o => !o)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all
+                    ${oneArticleMode
+                      ? 'bg-amber-600/20 border-amber-500/60 text-amber-300'
+                      : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300'}`}>
+                  <span>{oneArticleMode ? '1️⃣' : '📄'}</span>
+                  {oneArticleMode ? '1 Article / Profile (ON)' : '1 Article / Profile'}
+                </button>
+
+                {/* Unique reading patterns toggle */}
+                <button onClick={() => setUniquePatterns(o => !o)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all
+                    ${uniquePatterns
+                      ? 'bg-purple-600/20 border-purple-500/60 text-purple-300'
+                      : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300'}`}>
+                  <span>🎭</span>
+                  Unique Patterns per Profile {uniquePatterns ? '(ON)' : '(OFF)'}
+                </button>
+
+                {/* Use next-post navigation */}
+                <button onClick={() => setUseNextPost(o => !o)}
+                  className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all
+                    ${useNextPost
+                      ? 'bg-blue-600/20 border-blue-500/60 text-blue-300'
+                      : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300'}`}>
+                  <span>⏭</span>
+                  Next-Post Navigation {useNextPost ? '(ON)' : '(OFF)'}
+                </button>
+
                 <div className="flex-1" />
                 {/* Pool usage bar */}
                 <div className="flex items-center gap-2">
@@ -441,6 +510,22 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
                   <span className="text-xs text-gray-500">{poolUsage}%</span>
                 </div>
               </div>
+
+              {/* Articles per profile — hidden when oneArticleMode */}
+              {!oneArticleMode && (
+              <div className="flex items-center gap-6">
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400 text-xs">Min articles/profile:</span>
+                  <input type="number" value={minPerProfile} onChange={e => setMinPerProfile(Number(e.target.value))} min={1} max={50}
+                    className="w-14 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-white text-xs text-center outline-none focus:border-green-500" />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-400 text-xs">Max articles/profile:</span>
+                  <input type="number" value={maxPerProfile} onChange={e => setMaxPerProfile(Number(e.target.value))} min={1} max={50}
+                    className="w-14 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1 text-white text-xs text-center outline-none focus:border-green-500" />
+                </div>
+              </div>
+              )}
 
               {/* Fix #1: Traffic source */}
               <div>
@@ -632,6 +717,27 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
                       </button>
                     </div>
 
+                    {/* Reading pattern badge */}
+                    {a.readingPattern && (
+                      <div className="flex items-center gap-1.5 flex-wrap mb-2 pb-2 border-b border-gray-700/50">
+                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-semibold
+                          ${a.readingPattern.scrollSpeed === 'slow'   ? 'bg-blue-900/40 text-blue-400'
+                          : a.readingPattern.scrollSpeed === 'fast'   ? 'bg-orange-900/40 text-orange-400'
+                          :                                             'bg-green-900/40 text-green-400'}`}>
+                          {a.readingPattern.scrollSpeed === 'slow' ? '🐢 Relaxed' : a.readingPattern.scrollSpeed === 'fast' ? '⚡ Brisk' : '📖 Normal'}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-gray-700/60 text-gray-400">
+                          dwell {a.readingPattern.dwellMin}–{a.readingPattern.dwellMax}s
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded text-[9px] bg-gray-700/60 text-gray-400">
+                          pause {Math.round(a.readingPattern.pauseChance * 100)}%
+                        </span>
+                        {a.readingPattern.useNextPost && (
+                          <span className="px-1.5 py-0.5 rounded text-[9px] bg-blue-900/30 text-blue-400">⏭ next-post</span>
+                        )}
+                      </div>
+                    )}
+
                     {a.articles.length === 0 ? (
                       <p className="text-xs text-gray-600 italic">Pool exhausted for this profile</p>
                     ) : (
@@ -641,7 +747,6 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
                             <span className="text-gray-600 w-4 flex-shrink-0">{i + 1}.</span>
                             <BookOpen size={10} className="text-gray-500 flex-shrink-0" />
                             <span className="text-gray-300 truncate flex-1">{article.title}</span>
-                            {/* Fix #11: Remove article */}
                             <button onClick={() => removeArticle(a.profileId, article.url)}
                               className="text-gray-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0">
                               <X size={10} />
@@ -682,9 +787,11 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
             <p>1. Same profile ko already-read article dobara nahi milega (24h history)</p>
             <p>2. Ek run mein same article 2 profiles ko nahi milega (URL-based overlap protection)</p>
             <p>3. Pool exhausted → oldest articles recycle hote hain + yellow warning dikhta hai</p>
-            <p>4. Per-profile re-shuffle (🔁 button) — sirf ek profile ke articles badlo</p>
-            <p>5. Per-article remove (hover → ✕) — specific article assignment se hatao</p>
-            <p className="text-green-400 mt-2">✅ Har profile ko unique articles — natural traffic pattern!</p>
+            <p>4. <span className="text-amber-400 font-medium">1 Article / Profile mode</span> — har profile ko sirf 1 article, phir next-post se naturally navigate karo</p>
+            <p>5. <span className="text-purple-400 font-medium">Unique Patterns</span> — same article bhi alag-alag profiles mein alag scroll speed, dwell time, pause frequency se padhega</p>
+            <p>6. <span className="text-blue-400 font-medium">Next-Post Navigation</span> — article bottom par website ke Prev/Next buttons click ho jaate hain</p>
+            <p>7. Per-profile re-shuffle (🔁) + per-article remove (hover → ✕)</p>
+            <p className="text-green-400 mt-2">✅ Har profile ka unique article + unique reading pattern = 100% natural traffic!</p>
           </div>
         </div>
       </div>

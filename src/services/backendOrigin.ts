@@ -46,3 +46,20 @@ export function backendUrl(apiPath: string): string {
   const path = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
   return `${base}${path}`;
 }
+
+const API_TOKEN_KEY = 'mmb_api_token';
+
+/** Auth header for protected server routes (update/push, clear logs, etc.) */
+export function getAuthHeaders(): Record<string, string> {
+  try {
+    const token = localStorage.getItem(API_TOKEN_KEY);
+    if (token) return { 'X-MMB-Token': token };
+  } catch { /* ignore */ }
+  return {};
+}
+
+export function storeApiToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(API_TOKEN_KEY, token);
+  } catch { /* ignore */ }
+}

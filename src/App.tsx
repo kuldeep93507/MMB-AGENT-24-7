@@ -13,6 +13,7 @@ import AnalyticsPage from './components/AnalyticsPage';
 import CommentTemplatesPage from './components/CommentTemplatesPage';
 import VideoShufflePage from './components/VideoShufflePage';
 import BacklinkPoolPage from './components/BacklinkPoolPage';
+import ProxyHealthPage from './components/ProxyHealthPage';
 import SplashScreen from './components/SplashScreen';
 import { useStore } from './store/useStore';
 import { useChannelStore } from './store/useChannelStore';
@@ -113,6 +114,8 @@ export default function App() {
             dismissToast={channelStore.dismissToast}
           />
         );
+      case 'proxy-health':
+        return <ProxyHealthPage profiles={profiles} onRenewProxy={renewProxy} />;
       case 'jobs':
         return <JobQueuePage jobs={jobs} onRetry={retryJob} />;
       case 'scheduler':

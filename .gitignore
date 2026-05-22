@@ -10,6 +10,10 @@ user-settings.json
 backlinks_data.json
 shuffle_data.json
 profiles_data.json
+profile_configs_data.json
+comments_data.json
+channels_data.json
+.api-token
 schedules_data.json
 *.log
 .DS_Store

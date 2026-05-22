@@ -844,6 +844,7 @@ async function searchYahoo(page, videoTitle, channelName, expectedDuration, huma
 async function openVideoSmart(page, videoTitle, channelName, videoUrl, expectedDuration, profileIndex, humanTypeFn, log, trafficMix, trafficPreference, options = {}) {
   const strictSource = !!options.strictTraffic;
   const source = assignTrafficSource(profileIndex, 30, !!videoUrl, trafficMix, trafficPreference);
+  const intendedSource = source;
   log('info', `[Traffic] Assigned source: ${source} (preference: ${trafficPreference || 'custom'})`);
 
   // Extract video ID from URL for 100% accurate verification in search results
@@ -858,7 +859,7 @@ async function openVideoSmart(page, videoTitle, channelName, videoUrl, expectedD
         await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
         await sleep(randomDelay(2000, 4000));
         log('success', '[Direct] Video opened via URL');
-        return { success: true, source: 'direct' };
+        return { success: true, source: 'direct', intendedSource };
       }
       result = await searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId);
       break;
@@ -936,7 +937,7 @@ async function openVideoSmart(page, videoTitle, channelName, videoUrl, expectedD
       log('warn', '[Fallback] ⚠️ All search sources failed — direct URL as LAST RESORT');
       await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await sleep(randomDelay(2000, 4000));
-      result = { success: true, source: 'direct-fallback' };
+      result = { success: true, source: 'direct-fallback', intendedSource, usedFallback: true };
     } else {
       log('error', '[Fallback] All sources failed and no URL available');
     }
@@ -944,6 +945,7 @@ async function openVideoSmart(page, videoTitle, channelName, videoUrl, expectedD
 
   // Post-open verification — wrong video par watch mat karo
   if (result && result.success) {
+    result = { ...result, intendedSource: result.intendedSource || intendedSource, usedFallback: result.usedFallback || (result.source !== intendedSource) };
     try {
       const { verifyOpenedVideo, detectPageBlock } = require('./agentBrain.cjs');
       const block = await detectPageBlock(page);
@@ -1028,7 +1030,7 @@ async function openVideoViaBacklink(page, videoTitle, channelName, videoUrl, bac
       log('warn', '[Backlink] No YT link on page — opening target video URL');
       await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await sleep(randomDelay(2500, 5000));
-      return { success: true, source: 'backlink-direct-fallback' };
+      return { success: true, source: 'backlink-direct-fallback', intendedSource: 'backlink', usedFallback: true };
     }
 
     log('warn', '[Backlink] No YouTube link on referral page');

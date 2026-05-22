@@ -2,8 +2,11 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import type { Profile, Job, LogEntry, OS, TaskType, LogSource } from '../types';
 import { postActivityLog, clearActivityLogs } from '../utils/logsApi';
 import {
-  generateProxyConfig, generateFingerprint, renewProxySession
+  generateProxyConfig, renewProxySession
 } from '../utils/generators';
+import { profileFromListRow, type ProviderListRow } from '../utils/profileAdapter';
+import { hydrateAllAppDataFromServer } from '../utils/appDataApi';
+import { fetchSettingsFromServer, saveSettingsLocal } from '../utils/settingsApi';
 import * as moreloginApi from '../services/moreloginApi';
 import {
   listProfiles as listProviderProfiles,
@@ -14,7 +17,7 @@ import {
   type BrowserProvider,
   type ProviderSelection,
 } from '../services/browserProviderApi';
-import { backendUrl } from '../services/backendOrigin';
+import { backendUrl, getAuthHeaders } from '../services/backendOrigin';
 
 let jobCounter = 0;
 
@@ -110,38 +113,21 @@ export function useStore() {
         : await listProviderProfiles(provider, 1, 100);
 
       if (res.code === 0 && res.data) {
-        const mappedProfiles: Profile[] = res.data.profiles.map((sp) => {
-          // OS: provider se aata hai — fallback Windows
-          const mapOs = (sp: any): OS => {
-            // MoreLogin: osId 1=Windows, 2=macOS, 3=Android
-            if (sp.osId === 2 || sp.osName?.toLowerCase().includes('mac')) return 'macOS';
-            if (sp.osId === 3 || sp.osName?.toLowerCase().includes('android')) return 'Android';
-            // Multilogin / MoreLogin OS hints via osName
-            if (sp.osName?.toLowerCase().includes('mac')) return 'macOS';
-            if (sp.osName?.toLowerCase().includes('android')) return 'Android';
-            return 'Windows'; // default
-          };
-          const os: OS = mapOs(sp);
-          const proxy = generateProxyConfig();
-          const fingerprint = generateFingerprint(os, proxy);
-
-          const profile: Profile = {
+        const mappedProfiles: Profile[] = res.data.profiles.map((sp: ProviderListRow & { osName?: string; osId?: number }) =>
+          profileFromListRow({
             id: sp.id,
             name: sp.name,
-            os,
-            status: sp.status === 'running' ? 'running' : 'stopped',
-            proxy,
-            fingerprint,
-            currentAction: sp.status === 'running' ? 'Active' : 'Idle',
-            createdAt: Date.now(),
-            selected: false,
-            envId: sp.id,
-            ip: sp.debugPort ? `debug:${sp.debugPort}` : undefined,
-            // Track which provider this profile belongs to (used for routing actions)
+            status: sp.status,
+            debugPort: sp.debugPort ?? null,
             browserType: sp.browserType,
-          };
-          return profile;
-        });
+            os: sp.os ?? sp.osName,
+            osId: sp.osId,
+            proxyHost: sp.proxyHost,
+            proxyPort: sp.proxyPort,
+            proxyUsername: sp.proxyUsername,
+            userAgentHint: sp.userAgentHint,
+          }),
+        );
 
         setProfiles(mappedProfiles);
         addLog('success', `Fetched ${mappedProfiles.length} profiles from ${provider} (Total: ${res.data.total})`);
@@ -174,6 +160,51 @@ export function useStore() {
     setLoading(true);
     await fetchProfiles(provider);
   }, [fetchProfiles]);
+
+  // Hydrate server-backed data + API token on mount
+  useEffect(() => {
+    void fetchSettingsFromServer().then((s) => {
+      if (s) saveSettingsLocal(s);
+    });
+    void hydrateAllAppDataFromServer();
+  }, []);
+
+  // Live worker queue from backend (replaces fake simulated jobs)
+  useEffect(() => {
+    const mapWorkerStatus = (s: string): Job['status'] => {
+      if (['watching', 'running', 'connecting', 'starting'].includes(s)) return 'running';
+      if (s === 'done') return 'done';
+      if (s === 'error' || s === 'crashed') return 'failed';
+      return 'pending';
+    };
+    const poll = async () => {
+      try {
+        const res = await fetch(backendUrl('/api/workers'));
+        if (!res.ok) return;
+        const data = await res.json();
+        const workers = Array.isArray(data.workers) ? data.workers : [];
+        setJobs(workers.map((w: Record<string, unknown>) => ({
+          id: String(w.profileId),
+          profileId: String(w.profileId),
+          profileName: String(w.profileName || w.profileId),
+          taskType: 'watch_video' as TaskType,
+          status: mapWorkerStatus(String(w.status || 'waiting')),
+          retryCount: Number(w.retries) || 0,
+          createdAt: Number(w.startedAt) || Date.now(),
+          startedAt: String(w.status) !== 'waiting' ? Number(w.startedAt) || Date.now() : undefined,
+          completedAt: w.status === 'done' ? Date.now() : undefined,
+          details: w.currentVideo
+            ? String(w.currentVideo)
+            : w.progress
+              ? `Progress ${w.progress}`
+              : undefined,
+        })));
+      } catch { /* offline */ }
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => clearInterval(id);
+  }, []);
 
   // Auto-fetch profiles on mount
   useEffect(() => {
@@ -523,43 +554,18 @@ export function useStore() {
     profiles.filter(p => p.selected && (p.status === 'running' || p.status === 'starting')).forEach(p => stopProfile(p.id));
   }, [profiles, stopProfile]);
 
-  const addJob = useCallback((profileId: string, taskType: TaskType, details?: string) => {
-    const profile = profiles.find(p => p.id === profileId);
-    if (!profile) return;
-    jobCounter++;
-    const job: Job = {
-      id: genId(),
-      profileId,
-      profileName: profile.name,
-      taskType,
-      status: 'pending',
-      retryCount: 0,
-      createdAt: Date.now(),
-      details,
-    };
-    setJobs(prev => [job, ...prev]);
+  const addJob = useCallback((_profileId: string, _taskType: TaskType, _details?: string) => {
+    addLog('info', 'Job Queue shows live backend workers — start tasks from Scheduler or Manual Control.');
+  }, [addLog]);
 
-    setTimeout(() => {
-      setJobs(prev => prev.map(j => j.id === job.id ? { ...j, status: 'running', startedAt: Date.now() } : j));
-      setProfiles(prev => prev.map(p => p.id === profileId ? { ...p, currentAction: TASK_LABELS[taskType] } : p));
-
-      setTimeout(() => {
-        const success = Math.random() > 0.1;
-        setJobs(prev => prev.map(j => j.id === job.id
-          ? { ...j, status: success ? 'done' : 'failed', completedAt: Date.now() }
-          : j
-        ));
-        setProfiles(prev => prev.map(p => p.id === profileId ? { ...p, currentAction: 'Idle' } : p));
-      }, randomDelay(3000, 10000));
-    }, randomDelay(500, 2000));
-  }, [profiles, addLog]);
-
-  const retryJob = useCallback((jobId: string) => {
-    setJobs(prev => prev.map(j => j.id === jobId
-      ? { ...j, status: 'pending', retryCount: j.retryCount + 1, completedAt: undefined }
-      : j
-    ));
-  }, []);
+  const retryJob = useCallback(async (jobId: string) => {
+    try {
+      await fetch(backendUrl(`/api/workers/stop/${jobId}`), { method: 'POST', headers: getAuthHeaders() });
+      addLog('info', `Worker stopped for retry — re-run schedule for profile ${jobId.slice(-4)}`);
+    } catch (err) {
+      addLog('warn', `Could not stop worker: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [addLog]);
 
   const clearLogs = useCallback(() => {
     setLogs([]);

@@ -7,6 +7,7 @@ import { backendUrl } from '../services/backendOrigin';
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'profiles', label: 'Profiles', icon: Users },
+  { id: 'proxy-health', label: 'Proxy Health', icon: Server },
   { id: 'channels', label: 'Channels', icon: Tv },
   { id: 'video-shuffle', label: 'Video Shuffle', icon: Shuffle },
   { id: 'backlinks', label: 'Backlinks', icon: Link },

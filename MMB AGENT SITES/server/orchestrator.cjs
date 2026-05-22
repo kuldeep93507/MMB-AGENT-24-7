@@ -30,6 +30,12 @@ class Orchestrator {
     const workerPath = path.join(__dirname, 'worker.cjs');
     const worker = new Worker(workerPath, {
       workerData: { profileId, envId, articles, settings },
+      stderr: true,
+    });
+
+    worker.stderr.on('data', (chunk) => {
+      const msg = chunk.toString().trim();
+      if (msg) this.addLog('error', `[STDERR] ${msg}`, profileId);
     });
 
     worker.on('message', (msg) => {

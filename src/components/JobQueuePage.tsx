@@ -82,7 +82,7 @@ export default function JobQueuePage({ jobs, onRetry }: JobQueuePageProps) {
           <div>
             <h1 className="text-2xl font-bold text-white">Job Queue</h1>
             <p className="text-gray-500 text-sm mt-0.5">
-              SQLite-based crash-safe job queue — {jobs.length} total jobs
+              Live backend worker threads — {jobs.length} active worker(s)
             </p>
           </div>
           <div className="flex items-center gap-2">

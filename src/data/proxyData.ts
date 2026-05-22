@@ -1,6 +1,6 @@
 export const PROXY_SERVER = 'us.smartproxy.net';
 export const PROXY_PORT = 3120;
-export const PROXY_PASSWORD = 'xEdCpOSFn3nd4ixu';
+export const PROXY_PASSWORD = '';
 export const PROXY_PREFIX = 'smart-pwgbkxcy3lyi';
 
 export const US_STATE_CITIES: Record<string, string[]> = {

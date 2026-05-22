@@ -1128,17 +1128,35 @@ class ProfileAgent {
             { strictTraffic: !!config.qaTestMode },
           );
         } else {
-          // YouTube search / suggested / custom → mobile YouTube search UI
+          // YouTube search / suggested / custom → mobile YouTube search UI, then full fallback chain
           this.log('info', '[Mobile] Android profile — YouTube search on m.youtube.com');
           let mobileSuccess = await mobileYouTubeSearch(page, videoTitle, channelName, (level, msg) => this.log(level, msg));
+          if (!mobileSuccess) {
+            this.log('warn', '[Mobile] YouTube search failed — trying external search fallback chain...');
+            const effectiveMix = resolveTrafficMix(config);
+            searchResult = await openVideoSmart(
+              page,
+              videoTitle,
+              channelName,
+              config.videoUrl || '',
+              config.expectedDuration || 0,
+              this._profileIndex || 0,
+              (p, text) => humanType(p, text, this.typingSpeed),
+              (level, msg) => this.log(level, msg),
+              effectiveMix,
+              config.trafficPreference || 'custom',
+              { strictTraffic: !!config.qaTestMode },
+            );
+            mobileSuccess = !!searchResult?.success;
+          }
           if (!mobileSuccess && config.videoUrl) {
             mobileSuccess = await mobileDirectWatch(page, config.videoUrl, (level, msg) => this.log(level, msg));
             if (mobileSuccess) {
-              searchResult = { success: true, source: 'mobile-direct-fallback' };
+              searchResult = { success: true, source: 'mobile-direct-fallback', intendedSource: 'youtube-search', usedFallback: true };
             }
           }
           if (!searchResult) {
-            searchResult = { success: mobileSuccess, source: 'mobile-youtube-search' };
+            searchResult = { success: mobileSuccess, source: 'mobile-youtube-search', intendedSource: 'youtube-search' };
           }
         }
       } else {
@@ -1183,7 +1201,14 @@ class ProfileAgent {
       
       // Track which source was used (for analytics)
       this._lastTrafficSource = searchResult.source;
-      this.log('success', `[Traffic] Opened via: ${searchResult.source}${searchResult.query ? ` | query: "${searchResult.query}"` : ''}`);
+      if (searchResult.intendedSource && searchResult.source !== searchResult.intendedSource) {
+        this.log(
+          'warn',
+          `[Traffic] Intended: ${searchResult.intendedSource} → Actual: ${searchResult.source}${searchResult.usedFallback ? ' (fallback)' : ''}${searchResult.query ? ` | query: "${searchResult.query}"` : ''}`,
+        );
+      } else {
+        this.log('success', `[Traffic] Opened via: ${searchResult.source}${searchResult.query ? ` | query: "${searchResult.query}"` : ''}`);
+      }
 
       const postVerify = await verifyOpenedVideo(page, {
         title: videoTitle,

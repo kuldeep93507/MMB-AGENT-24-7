@@ -24,7 +24,7 @@ function normalizeProviderId(raw) {
   return n;
 }
 
-const VALID_PROVIDERS = ['morelogin', 'multilogin'];
+const VALID_PROVIDERS = ['morelogin', 'multilogin', 'adspower'];
 
 /**
  * Required environment variables per provider.

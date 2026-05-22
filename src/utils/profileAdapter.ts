@@ -16,13 +16,17 @@ export type ProviderListRow = {
   debugPort: number | null;
   browserType: "morelogin" | "multilogin";
   os?: string | null;
+  osId?: number;
   proxyHost?: string;
   proxyPort?: number;
   proxyUsername?: string;
   userAgentHint?: string;
 };
 
-export function mapProviderOsLabel(raw?: string | null): OS {
+export function mapProviderOsLabel(raw?: string | null, osId?: number): OS {
+  if (osId === 2) return 'macOS';
+  if (osId === 3) return 'Android';
+  if (osId === 1) return 'Windows';
   const s = String(raw || "").trim().toLowerCase();
   if (!s) return "Unknown";
   if (s.includes("android")) return "Android";
@@ -165,7 +169,7 @@ function proxyHintsFromRow(sp: ProviderListRow): ProxyConfig | null {
 
 /** Browser provider list row → Profile */
 export function profileFromListRow(sp: ProviderListRow): Profile {
-  const os = mapProviderOsLabel(sp.os);
+  const os = mapProviderOsLabel(sp.os, sp.osId);
   const snap = loadProfileSnapshot(sp.id);
 
   const hintedProxy = proxyHintsFromRow(sp);

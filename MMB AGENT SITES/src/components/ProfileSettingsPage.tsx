@@ -6,6 +6,7 @@ interface ProfileSettingsPageProps {
   profiles: Profile[];
   profileSettings: ProfileSiteSettings[];
   updateProfileSettings: (profileId: string, updates: Partial<ProfileSiteSettings>) => void;
+  initialProfileId?: string;
 }
 
 const DEFAULTS: Omit<ProfileSiteSettings, 'profileId'> = {
@@ -20,6 +21,9 @@ const DEFAULTS: Omit<ProfileSiteSettings, 'profileId'> = {
   startDelayMin: 5,
   startDelayMax: 30,
   sessionLimit: 10,
+  multiPageSession: true,
+  useNextPost: true,
+  multiloginPort: undefined,
 };
 
 const TRAFFIC_OPTIONS: { value: TrafficSource; label: string; icon: string }[] = [
@@ -41,16 +45,18 @@ function validate(s: ProfileSiteSettings): string[] {
   return errs;
 }
 
-export default function ProfileSettingsPage({ profiles, profileSettings, updateProfileSettings }: ProfileSettingsPageProps) {
-  const [selectedProfile, setSelectedProfile] = useState<string>('');
+export default function ProfileSettingsPage({ profiles, profileSettings, updateProfileSettings, initialProfileId }: ProfileSettingsPageProps) {
+  const [selectedProfile, setSelectedProfile] = useState<string>(initialProfileId ?? '');
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null);
 
-  // Wait for profiles to load before picking default
+  // Pre-select initialProfileId when it changes, or fall back to first profile
   useEffect(() => {
-    if (profiles.length > 0 && !selectedProfile) {
+    if (initialProfileId) {
+      setSelectedProfile(initialProfileId);
+    } else if (profiles.length > 0 && !selectedProfile) {
       setSelectedProfile(profiles[0].id);
     }
-  }, [profiles, selectedProfile]);
+  }, [initialProfileId, profiles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const settings = profileSettings.find(s => s.profileId === selectedProfile);
   const profile  = profiles.find(p => p.id === selectedProfile);
@@ -180,10 +186,11 @@ export default function ProfileSettingsPage({ profiles, profileSettings, updateP
             <select value={settings.scrollSpeed}
               onChange={e => upd({ scrollSpeed: e.target.value as ScrollSpeed })}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm outline-none">
-              <option value="slow">Slow (0.7x)</option>
-              <option value="medium">Medium (1.0x)</option>
-              <option value="fast">Fast (1.5x)</option>
+              <option value="slow">Natural — relaxed human scroll + random pauses</option>
+              <option value="medium">Normal — steady reading pace</option>
+              <option value="fast">Brisk — quick scan, fast reader</option>
             </select>
+            <p className="text-gray-600 text-xs mt-1">All speeds add random micro-pauses and variable chunk sizes</p>
           </div>
 
           {/* Comment */}
@@ -248,6 +255,42 @@ export default function ProfileSettingsPage({ profiles, profileSettings, updateP
               min={1} max={30}
               className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm outline-none" />
           </div>
+
+          {/* Multi Page Session */}
+          <div>
+            <label className="text-gray-400 text-xs mb-1 block">Multi-Page Session</label>
+            <select value={settings.multiPageSession ? 'yes' : 'no'}
+              onChange={e => upd({ multiPageSession: e.target.value === 'yes' })}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm outline-none">
+              <option value="yes">Enabled — read multiple articles per session</option>
+              <option value="no">Disabled — one article then close</option>
+            </select>
+          </div>
+
+          {/* Use Next Post */}
+          <div>
+            <label className="text-gray-400 text-xs mb-1 block">Use Next-Post Links</label>
+            <select value={settings.useNextPost ? 'yes' : 'no'}
+              onChange={e => upd({ useNextPost: e.target.value === 'yes' })}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm outline-none">
+              <option value="yes">Enabled — navigate via next post button</option>
+              <option value="no">Disabled — direct URL only</option>
+            </select>
+          </div>
+
+          {/* Multilogin Port Override */}
+          {profile.browserType === 'multilogin' && (
+            <div>
+              <label className="text-gray-400 text-xs mb-1 block">Multilogin CDP Port Override</label>
+              <input type="number"
+                value={settings.multiloginPort ?? ''}
+                placeholder="Auto-detect (leave empty)"
+                onChange={e => upd({ multiloginPort: e.target.value ? Number(e.target.value) : undefined })}
+                min={1024} max={65535}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm outline-none font-mono" />
+              <p className="text-gray-600 text-xs mt-1">Set if profile is already running (skip auto-start). E.g. 46653</p>
+            </div>
+          )}
         </div>
 
         {/* Traffic Preference — full 8 sources */}

@@ -105,6 +105,13 @@ class Orchestrator {
           // Notify main thread so it can clean up runningSchedules (prevent memory leak)
           if (this.onWorkerDone) this.onWorkerDone(profileId);
           break;
+        case 'video_done':
+          if (typeof msg.videoIndex === 'number' && state.remainingVideos) {
+            state.remainingVideos = state.remainingVideos.slice(
+              Math.min(msg.videoIndex + 1, state.remainingVideos.length),
+            );
+          }
+          break;
         case 'error':
           state.status = 'error';
           state.logs.push({ time: new Date().toISOString(), level: 'error', message: msg.error });
@@ -141,18 +148,31 @@ class Orchestrator {
     worker.on('error', (err) => {
       console.error(`[Orchestrator] Worker ${profileId.slice(-4)} error:`, err.message);
       const state = this.workers.get(profileId);
-      if (state) {
+      if (!state) return;
+      state.status = 'error';
+      state.logs.push({ time: new Date().toISOString(), level: 'error', message: `Worker crashed: ${err.message}` });
+      if (this.onActivityLog) {
+        this.onActivityLog({
+          level: 'error',
+          message: `Worker crashed: ${err.message}`,
+          profileId,
+          profileName: state.profileName,
+          source: 'worker',
+        });
+      }
+      if (state.retries < this.maxRetries) {
+        state.retries++;
+        const remainingVideos = (state.remainingVideos && state.remainingVideos.length > 0)
+          ? state.remainingVideos
+          : videos;
+        state.remainingVideos = remainingVideos;
+        console.log(`[Orchestrator] Worker ${profileId.slice(-4)} thread error — restarting with ${remainingVideos.length} remaining videos (${state.retries}/${this.maxRetries})`);
+        setTimeout(() => {
+          this.startWorker(profileId, profileName, remainingVideos, config, 3000);
+        }, 5000);
+      } else {
         state.status = 'crashed';
-        state.logs.push({ time: new Date().toISOString(), level: 'error', message: `Worker crashed: ${err.message}` });
-        if (this.onActivityLog) {
-          this.onActivityLog({
-            level: 'error',
-            message: `Worker crashed: ${err.message}`,
-            profileId,
-            profileName: state.profileName,
-            source: 'worker',
-          });
-        }
+        console.log(`[Orchestrator] Worker ${profileId.slice(-4)} — max retries reached after thread crash`);
       }
     });
 

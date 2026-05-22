@@ -1,4 +1,4 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendUrl, getAuthHeaders, storeApiToken } from '../services/backendOrigin';
 import type { ProviderSelection } from '../services/browserProviderApi';
 
 export type ProxyLifeSetting = '1hr' | '2hr' | '4hr' | '8hr' | '24hr';
@@ -76,6 +76,7 @@ export async function fetchSettingsFromServer(): Promise<AppSettings | null> {
     if (!res.ok) return null;
     const data = await res.json();
     if (!data.success || !data.settings) return null;
+    if (typeof data.apiToken === 'string' && data.apiToken) storeApiToken(data.apiToken);
     return { ...DEFAULT_APP_SETTINGS, ...data.settings };
   } catch {
     return null;
@@ -86,7 +87,7 @@ export async function saveSettingsToServer(settings: AppSettings): Promise<{ suc
   try {
     const res = await fetch(backendUrl('/api/settings'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(settings),
     });
     const data = await res.json();

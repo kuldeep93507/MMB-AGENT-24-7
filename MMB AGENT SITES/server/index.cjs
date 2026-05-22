@@ -41,6 +41,7 @@ const cdpPortCache = new Map();
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const ANALYTICS_FILE = path.join(DATA_DIR, 'analytics_data.json');
 const READ_HISTORY_FILE = path.join(DATA_DIR, 'read_history.json');
+const SHUFFLE_FILE = path.join(DATA_DIR, 'shuffle_schedules.json');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -155,7 +156,7 @@ function moreloginRequest(endpoint, body) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': apiKey,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Length': Buffer.byteLength(payload),
       },
       timeout: 60000,
@@ -366,33 +367,56 @@ app.post('/api/scheduler/run', async (req, res) => {
               (schedule.articleDelayMax || 60) * 1000
             ) / 1000;
 
+            // Per-profile readingPattern from Article Shuffle (if present)
+            const assignment = schedule.assignments?.find(a => a.profileId === profileId);
+            const rp = assignment?.readingPattern || null;
+
             const results = await agent.runSession(freshArticles, {
               trafficPreference: schedule.trafficSource || 'random',
               articleDelay,
-              readTimeMin: schedule.readTimeMin || 30,
-              readTimeMax: schedule.readTimeMax || 300,
-              scrollSpeed: schedule.scrollSpeed || 'medium',
+              readTimeMin:  rp ? rp.dwellMin  : (schedule.readTimeMin  || 30),
+              readTimeMax:  rp ? rp.dwellMax  : (schedule.readTimeMax  || 300),
+              scrollSpeed:  rp ? rp.scrollSpeed : (schedule.scrollSpeed || 'medium'),
               adPauseDurationMin: 0.5,
               adPauseDurationMax: 2,
+              siteUrl: freshArticles[0]?.siteUrl || '',
+              multiPageSession: true,
+              useNextPost: rp ? rp.useNextPost : (schedule.useNextPost !== false),
             });
 
             for (const r of results) {
               if (r.result) {
-                if (!readHistoryData[profileId]) readHistoryData[profileId] = [];
-                readHistoryData[profileId].push({ url: r.article.url, title: r.article.title, dwellTime: r.result.dwellTime || 0, trafficSource: r.result.trafficSource || 'random', readAt: Date.now() });
-                progressEntry.articlesRead++;
-                analyticsData.totalReads++;
-                analyticsData.totalDwellTime += r.result.dwellTime || 0;
                 const src = r.result.trafficSource || 'direct';
-                if (analyticsData.trafficSources[src] !== undefined) analyticsData.trafficSources[src]++;
+                const dwell = r.result.dwellTime || 0;
+
+                // Read history (prevents re-reads + tracks related posts too)
+                if (!readHistoryData[profileId]) readHistoryData[profileId] = [];
+                readHistoryData[profileId].push({ url: r.article.url, title: r.article.title, dwellTime: dwell, trafficSource: src, readAt: Date.now() });
+
+                progressEntry.articlesRead++;
+
+                // Analytics — totals
+                analyticsData.totalReads++;
+                analyticsData.totalDwellTime += dwell;
+
+                // Traffic source — correctly mapped
+                const srcKey = ['google','bing','duckduckgo','yahoo','direct','internal','backlink','social'].includes(src) ? src : 'direct';
+                analyticsData.trafficSources[srcKey] = (analyticsData.trafficSources[srcKey] || 0) + 1;
+
+                // Per-profile
                 if (!analyticsData.perProfile[profileId]) analyticsData.perProfile[profileId] = { reads: 0, dwellTime: 0 };
                 analyticsData.perProfile[profileId].reads++;
-                analyticsData.perProfile[profileId].dwellTime += r.result.dwellTime || 0;
-                const siteHost = new URL(r.article.url).hostname;
-                if (!analyticsData.perSite[siteHost]) analyticsData.perSite[siteHost] = { reads: 0, dwellTime: 0 };
-                analyticsData.perSite[siteHost].reads++;
-                analyticsData.perSite[siteHost].dwellTime += r.result.dwellTime || 0;
-                analyticsData.recentActivity.unshift({ profileId, url: r.article.url, title: r.article.title, dwellTime: r.result.dwellTime || 0, trafficSource: src, readAt: Date.now() });
+                analyticsData.perProfile[profileId].dwellTime += dwell;
+
+                // Per-site
+                try {
+                  const siteHost = new URL(r.article.url).hostname;
+                  if (!analyticsData.perSite[siteHost]) analyticsData.perSite[siteHost] = { reads: 0, dwellTime: 0 };
+                  analyticsData.perSite[siteHost].reads++;
+                  analyticsData.perSite[siteHost].dwellTime += dwell;
+                } catch {}
+
+                analyticsData.recentActivity.unshift({ profileId, url: r.article.url, title: r.article.title, dwellTime: dwell, trafficSource: src, readAt: Date.now() });
                 if (analyticsData.recentActivity.length > 100) analyticsData.recentActivity.length = 100;
               }
             }
@@ -421,7 +445,7 @@ app.post('/api/scheduler/run', async (req, res) => {
     progressEntry.completedAt = Date.now();
   }
 
-  const concurrent = schedule.concurrent === true;
+  const concurrent = schedule.concurrent !== false; // default: all profiles run in parallel
   console.log(`Mode: ${concurrent ? 'CONCURRENT' : 'sequential'}`);
 
   (async () => {
@@ -761,8 +785,18 @@ app.post('/api/manual/batch', async (req, res) => {
           break;
         }
         case 'scrollToBottom': {
-          await page.evaluate(() => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
-          results.push({ profileId, status: 'ok', action: 'scrolled to bottom' });
+          // Human-like scroll to bottom using mouse.wheel (not JS evaluate — avoids detection)
+          const pageHeight = await page.evaluate(() => document.body.scrollHeight - window.innerHeight).catch(() => 3000);
+          const steps = Math.floor(Math.random() * 12) + 10;
+          for (let s = 0; s < steps; s++) {
+            const progress = s / steps;
+            const speedMult = 0.4 + Math.sin(progress * Math.PI) * 0.8;
+            const chunk = (pageHeight / steps) * speedMult + (Math.random() * 20 - 10);
+            await page.mouse.wheel(0, Math.max(10, chunk)).catch(() => {});
+            await sleep(randomDelay(40, 90));
+            if (Math.random() < 0.08) await sleep(randomDelay(400, 1200)); // occasional pause
+          }
+          results.push({ profileId, status: 'ok', action: 'scrolled to bottom (human-like)' });
           break;
         }
         case 'openHomepage': {

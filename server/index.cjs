@@ -22,6 +22,8 @@ const { MultiloginCookiesService } = require('./services/MultiloginCookiesServic
 
 const cookiesService = new MultiloginCookiesService();
 const activityLog = require('./activityLog.cjs');
+const { getApiToken, requireAuth } = require('./apiAuth.cjs');
+const appDataStore = require('./appDataStore.cjs');
 
 const app = express();
 app.use(cors({
@@ -153,8 +155,9 @@ function getMaxConcurrent() {
     const n = parseInt(s.maxConcurrent, 10);
     if (Number.isFinite(n) && n > 0) return n;
   } catch { /* use default */ }
-  const envN = parseInt(process.env.MAX_CONCURRENT || '9999', 10);
-  return Number.isFinite(envN) && envN > 0 ? envN : 9999;
+  const envN = parseInt(process.env.MAX_CONCURRENT || '', 10);
+  if (Number.isFinite(envN) && envN > 0) return envN;
+  return parseInt(DEFAULT_SETTINGS.maxConcurrent, 10) || 5;
 }
 
 function loadAppSettings() {
@@ -421,7 +424,7 @@ app.post('/api/logs', (req, res) => {
   res.json({ success: true, entry });
 });
 
-app.delete('/api/logs', (req, res) => {
+app.delete('/api/logs', requireAuth, (req, res) => {
   activityLog.clear();
   res.json({ success: true });
 });
@@ -474,11 +477,16 @@ app.post('/api/analytics/track', (req, res) => {
     case 'traffic_google': analyticsData.trafficGoogle = (analyticsData.trafficGoogle || 0) + 1; break;
     case 'traffic_bing': analyticsData.trafficBing = (analyticsData.trafficBing || 0) + 1; break;
     case 'traffic_direct': analyticsData.trafficDirect = (analyticsData.trafficDirect || 0) + 1; break;
-    case 'traffic_direct-fallback': analyticsData.trafficDirect = (analyticsData.trafficDirect || 0) + 1; break;
+    case 'traffic_direct-fallback':
+    case 'traffic_mobile-direct-fallback':
+      analyticsData.trafficDirectFallback = (analyticsData.trafficDirectFallback || 0) + 1;
+      break;
     case 'traffic_channel-page': analyticsData.trafficChannel = (analyticsData.trafficChannel || 0) + 1; break;
     case 'traffic_backlink':
-    case 'traffic_backlink-direct-fallback':
       analyticsData.trafficBacklink = (analyticsData.trafficBacklink || 0) + 1;
+      break;
+    case 'traffic_backlink-direct-fallback':
+      analyticsData.trafficBacklinkFallback = (analyticsData.trafficBacklinkFallback || 0) + 1;
       break;
   }
 
@@ -517,7 +525,7 @@ function aggregateAnalyticsFromLogs(logs, recentActivity, filterMeta) {
     totalLikes: 0, totalSubscribes: 0, totalComments: 0,
     totalAds: 0, adsSkipped: 0, adsWatchedFull: 0, adWatchTime: 0,
     trafficYouTube: 0, trafficGoogle: 0, trafficBing: 0, trafficDirect: 0, trafficChannel: 0,
-    trafficBacklink: 0,
+    trafficBacklink: 0, trafficDirectFallback: 0, trafficBacklinkFallback: 0,
     perProfile: {},
     recentActivity: recentActivity || [],
     dailyTrend: buildDailyTrendFromLogs(logs),
@@ -545,11 +553,15 @@ function aggregateAnalyticsFromLogs(logs, recentActivity, filterMeta) {
       case 'traffic_youtube-search': filtered.trafficYouTube++; break;
       case 'traffic_google': filtered.trafficGoogle++; break;
       case 'traffic_bing': filtered.trafficBing++; break;
-      case 'traffic_direct': case 'traffic_direct-fallback': filtered.trafficDirect++; break;
+      case 'traffic_direct': filtered.trafficDirect++; break;
+      case 'traffic_direct-fallback':
+      case 'traffic_mobile-direct-fallback':
+        filtered.trafficDirectFallback++;
+        break;
       case 'traffic_channel-page': filtered.trafficChannel++; break;
-      case 'traffic_backlink':
+      case 'traffic_backlink': filtered.trafficBacklink++; break;
       case 'traffic_backlink-direct-fallback':
-        filtered.trafficBacklink++;
+        filtered.trafficBacklinkFallback++;
         break;
       default: break;
     }
@@ -848,6 +860,99 @@ app.post('/api/proxy/rotate', async (req, res) => {
   }
 });
 
+// POST /api/proxy/check — real proxy speed + geo via ip-api.com
+app.post('/api/proxy/check', async (req, res) => {
+  const { server, port, username, password } = req.body || {};
+  if (!server || !port) return res.status(400).json({ success: false, error: 'server and port required' });
+
+  const start = Date.now();
+  try {
+    const result = await new Promise((resolve, reject) => {
+      const options = {
+        hostname: server,
+        port: parseInt(port, 10) || 3120,
+        path: 'http://ip-api.com/json',
+        method: 'GET',
+        headers: {
+          Host: 'ip-api.com',
+          'User-Agent': 'Mozilla/5.0',
+          'Proxy-Authorization': 'Basic ' + Buffer.from(`${username || ''}:${password || ''}`).toString('base64'),
+        },
+      };
+      const req2 = http.request(options, (proxyRes) => {
+        let data = '';
+        proxyRes.on('data', (c) => { data += c; });
+        proxyRes.on('end', () => {
+          try {
+            const json = JSON.parse(data);
+            if (json.status === 'success') {
+              resolve({ ip: json.query, city: json.city, region: json.regionName, country: json.country, isp: json.isp });
+            } else {
+              resolve({ ip: 'Unknown', city: '', region: '', country: '', isp: json.message || '' });
+            }
+          } catch {
+            resolve({ ip: 'Unknown', city: '', region: '', country: '', isp: '' });
+          }
+        });
+      });
+      req2.setTimeout(9000, () => { req2.destroy(); reject(new Error('timeout')); });
+      req2.on('error', reject);
+      req2.end();
+    });
+    res.json({ success: true, ...result, speed: Date.now() - start });
+  } catch (err) {
+    res.json({ success: false, error: err.message || 'failed', speed: Date.now() - start });
+  }
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// APP DATA — profile configs, comments, channels (server source of truth)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.get('/api/profile-configs', (req, res) => {
+  res.json({ success: true, configs: appDataStore.getAllProfileConfigs() });
+});
+
+app.get('/api/profile-config/:profileId', (req, res) => {
+  const config = appDataStore.getProfileConfig(req.params.profileId);
+  if (!config) return res.status(404).json({ success: false, error: 'Not found' });
+  res.json({ success: true, config });
+});
+
+app.put('/api/profile-config/:profileId', (req, res) => {
+  const { config } = req.body || {};
+  if (!config || typeof config !== 'object') return res.status(400).json({ success: false, error: 'config object required' });
+  appDataStore.setProfileConfig(req.params.profileId, config);
+  res.json({ success: true });
+});
+
+app.put('/api/profile-configs', (req, res) => {
+  const { configs } = req.body || {};
+  if (!configs || typeof configs !== 'object') return res.status(400).json({ success: false, error: 'configs object required' });
+  appDataStore.setAllProfileConfigs(configs);
+  res.json({ success: true, count: Object.keys(configs).length });
+});
+
+app.get('/api/comments', (req, res) => {
+  res.json({ success: true, comments: appDataStore.getComments() });
+});
+
+app.put('/api/comments', (req, res) => {
+  const { comments } = req.body || {};
+  if (!Array.isArray(comments)) return res.status(400).json({ success: false, error: 'comments array required' });
+  appDataStore.setComments(comments);
+  res.json({ success: true, count: comments.length });
+});
+
+app.get('/api/channels-data', (req, res) => {
+  res.json({ success: true, ...appDataStore.getChannelsBundle() });
+});
+
+app.put('/api/channels-data', (req, res) => {
+  const { channels, videos, playlists } = req.body || {};
+  appDataStore.setChannelsBundle({ channels, videos, playlists });
+  res.json({ success: true });
+});
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // SCHEDULED TIMER — Check every minute for due schedules
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -881,29 +986,41 @@ app.post('/api/schedule/timer/cancel', (req, res) => {
   res.json({ success: true });
 });
 
-// Check every 60 seconds for due schedules
+// Check every 60 seconds for due schedules (respects max concurrent like /api/schedule/run)
 setInterval(() => {
   const now = Date.now();
   for (const [id, job] of scheduledJobs) {
-    if (job.nextRun && now >= job.nextRun) {
-      console.log(`[Timer] ⏰ Schedule "${job.schedule.name}" is DUE — running now!`);
-      // Run the schedule
-      orchestrator.runSchedule(job.schedule);
-      
-      // Calculate next run if repeat enabled
-      const scheduleId = job.schedule?.id || id;
-      runningSchedules.set(scheduleId, { schedule: job.schedule, status: 'running', startedAt: Date.now() });
+    if (!job.nextRun || now < job.nextRun) continue;
 
-      if (job.repeat) {
-        const intervals = { '1hr': 3600000, '3hr': 10800000, '6hr': 21600000, '12hr': 43200000, '24hr': 86400000, 'daily': 86400000 };
-        job.nextRun = now + (intervals[job.repeat] || 21600000);
-        console.log(`[Timer] Next run: ${new Date(job.nextRun).toLocaleString()}`);
-      } else {
-        scheduledJobs.delete(id);
-      }
+    const maxConcurrent = getMaxConcurrent();
+    const currentRunning = orchestrator.getStats().running + activeAgents.size;
+    if (currentRunning >= maxConcurrent) {
+      console.log(`[Timer] ⏰ "${job.schedule.name}" due but skipped — max concurrent (${maxConcurrent}) reached`);
+      continue;
+    }
+
+    console.log(`[Timer] ⏰ Schedule "${job.schedule.name}" is DUE — running now!`);
+    const scheduleToRun = { ...job.schedule };
+    const availableSlots = Math.max(1, maxConcurrent - currentRunning);
+    if (scheduleToRun.selectedProfiles?.length > availableSlots) {
+      scheduleToRun.selectedProfiles = scheduleToRun.selectedProfiles.slice(0, availableSlots);
+      console.log(`[Timer] Trimmed to ${availableSlots} profiles (limit: ${maxConcurrent})`);
+    }
+
+    orchestrator.runSchedule(scheduleToRun);
+
+    const scheduleId = scheduleToRun.id || id;
+    runningSchedules.set(scheduleId, { schedule: scheduleToRun, status: 'running', startedAt: Date.now() });
+
+    if (job.repeat) {
+      const intervals = { '1hr': 3600000, '3hr': 10800000, '6hr': 21600000, '12hr': 43200000, '24hr': 86400000, 'daily': 86400000 };
+      job.nextRun = now + (intervals[job.repeat] || 21600000);
+      console.log(`[Timer] Next run: ${new Date(job.nextRun).toLocaleString()}`);
+    } else {
+      scheduledJobs.delete(id);
     }
   }
-}, 60000); // Check every minute
+}, 60000);
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // WORKER THREAD STATUS
@@ -1268,7 +1385,7 @@ app.post('/api/settings/save', (req, res) => {
 // AUTO UPDATE — git pull + npm install
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-app.post('/api/update/run', async (req, res) => {
+app.post('/api/update/run', requireAuth, async (req, res) => {
   const { execSync } = require('child_process');
   const path = require('path');
   const projectDir = path.resolve(__dirname, '..');
@@ -1311,7 +1428,7 @@ app.get('/api/update/version', (req, res) => {
 });
 
 // Push update to GitHub (from main laptop)
-app.post('/api/update/push', async (req, res) => {
+app.post('/api/update/push', requireAuth, async (req, res) => {
   const { execFileSync } = require('child_process');
   const fs = require('fs');
   const path = require('path');
@@ -1527,9 +1644,9 @@ app.put('/api/cookies/metadata', async (req, res) => {
 // SETTINGS API
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// GET /api/settings — return current settings
+// GET /api/settings — return current settings + local API token for authenticated mutations
 app.get('/api/settings', (req, res) => {
-  res.json({ success: true, settings: appSettings });
+  res.json({ success: true, settings: appSettings, apiToken: getApiToken() });
 });
 
 // POST /api/settings — save + hot-apply to process.env + clear provider cache

@@ -64,6 +64,8 @@ function sendError(profileId, error) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MAIN WORKER LOGIC
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+let activeWorkerAgent = null;
+
 async function runWorker(data) {
   let { profileId, profileName, videos, config, startDelay } = data;
   const browserType = normalizeScheduleBrowserProvider(config?.browserType);
@@ -160,6 +162,7 @@ async function runWorker(data) {
       return res;
     },
   });
+  activeWorkerAgent = agent;
   const connected = browserType === 'multilogin'
     ? await agent.connectWithRetry(12, 4000)
     : await agent.connect();
@@ -270,6 +273,9 @@ async function runWorker(data) {
         videoId,
         status: 'watched',
       });
+      if (parentPort) {
+        parentPort.postMessage({ type: 'video_done', profileId, videoIndex: i });
+      }
       sendLog(profileId, 'success', `✓ Watched: "${video.title || video.value}"`);
     } else {
       results.failed++;
@@ -293,6 +299,7 @@ async function runWorker(data) {
   } catch (err) {
     sendLog(profileId, 'warn', `Disconnect error (non-critical): ${err.message}`);
   } finally {
+    activeWorkerAgent = null;
     // YE HAMESHA CHALEGA — error ho ya na ho
     try {
       const provider = providerFactory.getProvider(browserType);
@@ -324,11 +331,20 @@ if (parentPort) {
       const stopProfileId = msg.profileId || 'unknown';
       const bt = normalizeScheduleBrowserProvider(msg.browserType);
       sendLog(stopProfileId, 'info', 'Worker received stop signal — cleaning up...');
-      // Close browser via provider before exiting so profile is not left locked
       try {
+        if (activeWorkerAgent) {
+          await activeWorkerAgent.disconnect().catch((err) => {
+            sendLog(stopProfileId, 'warn', `Disconnect on stop: ${err.message}`);
+          });
+          activeWorkerAgent = null;
+        }
         const stopProvider = providerFactory.getProvider(bt);
-        await stopProvider.stopProfile(stopProfileId).catch(() => {});
-      } catch {}
+        await stopProvider.stopProfile(stopProfileId).catch((err) => {
+          sendLog(stopProfileId, 'warn', `Stop profile on stop signal: ${err.message}`);
+        });
+      } catch (err) {
+        sendLog(stopProfileId, 'warn', `Stop cleanup error: ${err.message}`);
+      }
       process.exit(0);
     }
   });
