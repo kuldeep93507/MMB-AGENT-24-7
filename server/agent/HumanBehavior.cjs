@@ -1,5 +1,6 @@
 /**
  * Human-like Playwright gestures: typing, mouse, wheel scroll, keyboard seek on watch pages.
+ * Imported by YoutubeUi / TrafficRouter (helpers injected via agent.cjs).
  */
 
 'use strict';

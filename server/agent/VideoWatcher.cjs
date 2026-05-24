@@ -1,6 +1,7 @@
 /**
  * Video watching: duration discovery, ads, timed watch loop (+ mixed-in ProfileAgent methods).
  * Scroll/keyboard/mouse + description + related hover: HumanBehavior / YoutubeUi (agent.cjs → setBehaviorHelpers).
+ * Traffic source routing (youtube UI search helpers) lives in TrafficRouter.cjs — separate from watcher.
  */
 
 const { planWatchAction } = require('../agentBrain.cjs');
