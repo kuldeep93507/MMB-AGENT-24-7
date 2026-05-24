@@ -55,7 +55,19 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
   }, []);
   const [selectedOS, setSelectedOS] = useState<OS | null>(null);
   const [profileMode, setProfileMode] = useState<'cloud' | 'quick'>(isMoreLogin ? 'quick' : 'cloud');
-  const [proxyType, setProxyType] = useState<'smartproxy' | 'multilogin' | 'none'>('smartproxy');
+  const [proxyType, setProxyType] = useState<'smartproxy' | 'multilogin'>('smartproxy');
+
+  useEffect(() => {
+    fetch(backendUrl('/api/settings'))
+      .then((r) => r.json())
+      .then((d) => {
+        const saved = d?.settings?.ytProxyType;
+        if (saved === 'multilogin' || saved === 'smartproxy') {
+          setProxyType(saved);
+        }
+      })
+      .catch(() => { /* keep default */ });
+  }, []);
   const [androidDevice, setAndroidDevice] = useState<string>('auto');
   const [count, setCount] = useState(1);
   const [creating, setCreating] = useState(false);
@@ -107,7 +119,7 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
     {
       id: 'smartproxy' as const,
       label: 'SmartProxy (Your Proxy)',
-      desc: 'Uses rotating residential IPs from your SmartProxy account (.env config)',
+      desc: 'us.smartproxy.net HTTP proxy from your .env — separate from Multilogin built-in.',
       icon: <Globe size={16} />,
       color: 'text-green-400',
       bg: 'border-green-500 bg-green-900/20',
@@ -115,18 +127,10 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
     {
       id: 'multilogin' as const,
       label: 'Multilogin Built-in',
-      desc: "Uses Multilogin's own residential proxy — billed per GB on your plan",
+      desc: 'MLX residential via gate.multilogin.com (SOCKS5) — US/UK only. NOT SmartProxy.',
       icon: <Wifi size={16} />,
       color: 'text-blue-400',
       bg: 'border-blue-500 bg-blue-900/20',
-    },
-    {
-      id: 'none' as const,
-      label: 'No Proxy',
-      desc: 'Profile will use your real IP — not recommended for automation',
-      icon: <X size={16} />,
-      color: 'text-gray-400',
-      bg: 'border-gray-500 bg-gray-800',
     },
   ];
 
@@ -348,9 +352,9 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
 
                 {/* Mode info box */}
                 {profileMode === 'cloud' && (
-                  <div className="mt-2 rounded-lg bg-gray-800 border border-gray-700 px-3 py-2 text-xs text-gray-400 space-y-0.5">
-                    <div className="flex items-center gap-2"><Cloud size={12} className="text-green-400" /> <span>Profile stored in Multilogin cloud — survives restarts</span></div>
-                    <div className="flex items-center gap-2"><span className="text-yellow-400">⚠️</span> <span>Canvas/WebRTC/Timezone use Multilogin default masking (not "Real")</span></div>
+                  <div className="mt-2 rounded-lg bg-amber-900/30 border border-amber-600/40 px-3 py-2 text-xs text-amber-200 space-y-0.5">
+                    <div className="flex items-center gap-2"><Cloud size={12} className="text-amber-400" /> <span>Multilogin cloud create may be unavailable (HTTP 501) — app auto-falls back to Quick/Local</span></div>
+                    <div className="flex items-center gap-2"><span className="text-green-400">✅</span> <span>For reliable create right now, pick Quick/Local mode below</span></div>
                   </div>
                 )}
                 {profileMode === 'quick' && !isMoreLogin && (
@@ -414,7 +418,7 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
                 <div className="rounded-xl bg-gray-800/60 border border-gray-700 px-4 py-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-400">
                   <span>🖥️ <span className="text-white font-medium">{selectedOS}</span>{selectedOS === 'Android' && androidDevice !== 'auto' ? ` · ${androidDevice.split(' ').slice(-2).join(' ')}` : ''}</span>
                   <span>{profileMode === 'cloud' ? '☁️' : '⚡'} <span className="text-white font-medium">{profileMode === 'cloud' ? 'Cloud' : 'Quick/Local'}</span></span>
-                  <span>🌐 <span className="text-white font-medium">{proxyType === 'smartproxy' ? 'SmartProxy' : proxyType === 'multilogin' ? 'Multilogin Proxy' : 'No Proxy'}</span></span>
+                  <span>🌐 <span className="text-white font-medium">{proxyType === 'smartproxy' ? 'SmartProxy (US)' : 'Multilogin Proxy (US/UK)'}</span></span>
                   <span>✕ <span className="text-white font-medium">{count}</span></span>
                 </div>
               )}
@@ -465,7 +469,7 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
 
               <p className="text-gray-400 text-sm text-center">
                 Creating profile {(progress?.done ?? 0) + 1} of {progress?.total ?? count}
-                {proxyType !== 'none' && ` · ${proxyType === 'smartproxy' ? 'SmartProxy' : 'Multilogin Proxy'}`}
+                {` · ${proxyType === 'smartproxy' ? 'SmartProxy US' : 'Multilogin US/UK'}`}
                 {` · ${profileMode === 'quick' ? '⚡ Quick' : '☁️ Cloud'}`}
               </p>
 

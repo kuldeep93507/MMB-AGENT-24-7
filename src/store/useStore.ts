@@ -4,7 +4,7 @@ import { postActivityLog, clearActivityLogs } from '../utils/logsApi';
 import {
   generateProxyConfig, renewProxySession
 } from '../utils/generators';
-import { profileFromListRow, type ProviderListRow } from '../utils/profileAdapter';
+import { profileFromListRow, saveSnapshotFromCreateFull, inferProxyTypeFromProfile, isMultiloginProxyHost, type ProviderListRow } from '../utils/profileAdapter';
 import { hydrateAllAppDataFromServer } from '../utils/appDataApi';
 import { fetchSettingsFromServer, saveSettingsLocal } from '../utils/settingsApi';
 import * as moreloginApi from '../services/moreloginApi';
@@ -51,13 +51,39 @@ const TASK_LABELS: Record<TaskType, string> = {
   idle: 'Idle',
 };
 
+const ACTIVE_TAB_KEY = 'mmb_active_tab';
+
+/** Must match Sidebar NAV_ITEMS ids */
+export const VALID_APP_TABS = new Set([
+  'dashboard', 'profiles', 'channels', 'video-shuffle', 'backlinks', 'scheduler',
+  'manual', 'analytics', 'comments', 'jobs', 'logs', 'settings',
+]);
+
+const REMOVED_TAB_REDIRECT: Record<string, string> = {
+  'proxy-health': 'dashboard',
+  engagement: 'channels',
+  performance: 'channels',
+  'orchestrator-log': 'channels',
+  'video-manager': 'channels',
+  'yt-agents': 'channels',
+};
+
+function loadActiveTab(): string {
+  try {
+    const saved = localStorage.getItem(ACTIVE_TAB_KEY);
+    if (saved && REMOVED_TAB_REDIRECT[saved]) return REMOVED_TAB_REDIRECT[saved];
+    if (saved && VALID_APP_TABS.has(saved)) return saved;
+  } catch { /* ignore */ }
+  return 'dashboard';
+}
+
 export function useStore() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>(() => {
     try { const d = localStorage.getItem('mmb_logs'); return d ? JSON.parse(d) : []; } catch { return []; }
   });
-  const [activeTab, setActiveTab] = useState<string>('dashboard');
+  const [activeTab, setActiveTabState] = useState<string>(loadActiveTab);
   const [loading, setLoading] = useState(false);
   const [recreatingIds, setRecreatingIds] = useState<Set<string>>(new Set());
   const [browserProvider, setBrowserProviderState] = useState<ProviderSelection>(() => {
@@ -78,6 +104,12 @@ export function useStore() {
     return 'multilogin';
   });
   const browserProviderRef = useRef<ProviderSelection>(browserProvider);
+
+  const setActiveTab = useCallback((tab: string) => {
+    const resolved = REMOVED_TAB_REDIRECT[tab] || (VALID_APP_TABS.has(tab) ? tab : 'dashboard');
+    setActiveTabState(resolved);
+    try { localStorage.setItem(ACTIVE_TAB_KEY, resolved); } catch { /* ignore */ }
+  }, []);
 
   const addLog = useCallback((
     level: LogEntry['level'],
@@ -284,14 +316,20 @@ export function useStore() {
           const d = result.data as {
             id?: string;
             profileMode?: string;
-            proxy?: { state?: string; type?: string; host?: string };
+            proxy?: { state?: string; type?: string; host?: string; server?: string; country?: string };
             fingerprint?: { timezone?: string };
           };
 
-          // Build proxy info string for log
+          if (d.id) {
+            saveSnapshotFromCreateFull(d.id, os, {
+              proxy: d.proxy as Record<string, unknown> | undefined,
+              fingerprint: d.fingerprint,
+            });
+          }
+
           const proxyInfo = d.proxy?.type === 'multilogin_residential'
-            ? 'Multilogin Residential'
-            : `US-${d.proxy?.state || '?'}`;
+            ? `Multilogin (${d.proxy.server || 'gate.multilogin.com'}) ${(d.proxy.country || 'us').toUpperCase()}`
+            : `SmartProxy US-${d.proxy?.state || '?'}`;
 
           addLog(
             'success',
@@ -456,6 +494,7 @@ export function useStore() {
     addLog('info', `Recreating profile "${profile.name}" via ${provider} (new proxy + fingerprint)...`, profileId, profile.name);
 
     try {
+      const proxyTypeForRecreate = inferProxyTypeFromProfile(profile);
       const res = await fetch(backendUrl('/api/profiles/recreate'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -464,7 +503,7 @@ export function useStore() {
           browserType: provider,
           os: profile.os,
           name: profile.name,
-          // BUG FIX: Recreate with real fingerprints (not masked)
+          proxyType: proxyTypeForRecreate,
           fingerprintConfig: {
             canvas: 'real',
             webrtc: 'real',
@@ -554,10 +593,6 @@ export function useStore() {
     profiles.filter(p => p.selected && (p.status === 'running' || p.status === 'starting')).forEach(p => stopProfile(p.id));
   }, [profiles, stopProfile]);
 
-  const addJob = useCallback((_profileId: string, _taskType: TaskType, _details?: string) => {
-    addLog('info', 'Job Queue shows live backend workers — start tasks from Scheduler or Manual Control.');
-  }, [addLog]);
-
   const retryJob = useCallback(async (jobId: string) => {
     try {
       await fetch(backendUrl(`/api/workers/stop/${jobId}`), { method: 'POST', headers: getAuthHeaders() });
@@ -576,6 +611,11 @@ export function useStore() {
   const renewProxy = useCallback(async (profileId: string) => {
     const profile = profiles.find(p => p.id === profileId);
     if (!profile) return;
+
+    if (isMultiloginProxyHost(profile.proxy.server)) {
+      addLog('info', `"${profile.name}" uses Multilogin built-in proxy — rotate from MLX or recreate profile instead.`, profileId, profile.name);
+      return;
+    }
 
     if (profile.status === 'running' || profile.status === 'starting') {
       addLog('warn', `Stop "${profile.name}" before renewing proxy on the provider.`, profileId, profile.name);
@@ -634,7 +674,7 @@ export function useStore() {
     deleteSelectedProfiles, recreateSelectedProfiles, exportProfileConfigs,
     recreatingIds,
     toggleSelect, selectAll, deselectAll, startSelected, stopSelected,
-    addJob, retryJob, clearLogs, renewProxy, fetchProfiles,
+    retryJob, clearLogs, renewProxy, fetchProfiles,
   };
 }
 

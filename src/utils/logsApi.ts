@@ -1,4 +1,4 @@
-import { backendUrl, getAuthHeaders } from '../services/backendOrigin';
+import { backendUrl, getAuthHeaders, storeApiToken } from '../services/backendOrigin';
 import type { LogEntry, LogLevel, LogSource } from '../types';
 
 export interface FetchLogsParams {
@@ -10,7 +10,24 @@ export interface FetchLogsParams {
   search?: string;
 }
 
-export async function fetchActivityLogs(params: FetchLogsParams = {}): Promise<{ entries: LogEntry[]; total: number }> {
+export interface ActivityLogsResponse {
+  entries: LogEntry[];
+  total: number;
+  stats?: Record<LogLevel, number>;
+  filtered?: number;
+}
+
+async function ensureApiToken(): Promise<void> {
+  if (getAuthHeaders()['X-MMB-Token']) return;
+  try {
+    const res = await fetch(backendUrl('/api/settings'));
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.apiToken === 'string' && data.apiToken) storeApiToken(data.apiToken);
+  } catch { /* ignore */ }
+}
+
+export async function fetchActivityLogs(params: FetchLogsParams = {}): Promise<ActivityLogsResponse> {
   const q = new URLSearchParams();
   if (params.limit) q.set('limit', String(params.limit));
   if (params.since) q.set('since', String(params.since));
@@ -49,12 +66,17 @@ export async function postActivityLog(
   }
 }
 
-export async function clearActivityLogs(): Promise<boolean> {
+export async function clearActivityLogs(): Promise<{ ok: boolean; error?: string }> {
   try {
+    await ensureApiToken();
     const res = await fetch(backendUrl('/api/logs'), { method: 'DELETE', headers: getAuthHeaders() });
-    return res.ok;
-  } catch {
-    return false;
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      return { ok: false, error: data.message || data.error || `HTTP ${res.status}` };
+    }
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Network error' };
   }
 }
 
@@ -67,4 +89,5 @@ export const LOG_SOURCE_LABELS: Record<LogSource, string> = {
   manual: 'Manual',
   settings: 'Settings',
   system: 'System',
+  'yt-agent': 'YT Agent',
 };

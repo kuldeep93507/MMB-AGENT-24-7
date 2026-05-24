@@ -5,12 +5,12 @@
  */
 
 const BASE_URL = '/morelogin-api';
-const API_KEY = '0df5ef07ccfd376ba7461deab39c040f6f80db8fc5829bfd';
+const API_KEY = import.meta.env.VITE_MORELOGIN_API_KEY ?? '';
 
 function getHeaders(): Record<string, string> {
   return {
     'Content-Type': 'application/json',
-    'Authorization': API_KEY,
+    ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
   };
 }
 

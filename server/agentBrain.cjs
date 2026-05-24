@@ -5,7 +5,7 @@
  * Rule-based (no LLM): sign-in/captcha detection, post-open verify, traffic prefs, scroll plan.
  */
 
-const { verifyVideoMatch } = require('./searchEngine.cjs');
+const { verifyVideoMatch } = require('./utils/videoMatch.cjs');
 
 function normalizeText(s) {
   return String(s || '')
@@ -92,8 +92,11 @@ function buildAgentConfig(profileConfig = {}, scheduleDefaults = {}) {
     tabDelayMax: scheduleDefaults.tabDelayMax ?? 120,
     adSkipEnabled: pc.adSkipEnabled !== undefined ? pc.adSkipEnabled : true,
     adSkipAfterSec: pc.adSkipAfterSec ?? 15,
+    midRollAdWaitSec: pc.midRollAdWaitSec ?? 15,
     videoQuality: pc.videoQuality || 'auto',
     scrollDuringWatch: pc.scrollDuringWatch !== undefined ? pc.scrollDuringWatch : true,
+    humanEngagementEnabled: pc.humanEngagementEnabled !== false,
+    seekForwardMax: pc.seekForwardMax ?? 2,
     startDelayMin: delayMin,
     startDelayMax: delayMax,
     browserType: pc.browserType,
@@ -317,6 +320,15 @@ async function verifyOpenedVideo(page, expected = {}) {
   const expectedVideoId = expected.videoId || extractVideoIdFromUrl(expected.videoUrl || '');
 
   const ctx = await readPlaybackContext(page);
+
+  // Video ID in URL = correct video (title/channel can load late on slow proxy)
+  if (expectedVideoId) {
+    const urlId = ctx.videoId || extractVideoIdFromUrl(ctx.url);
+    if (urlId === expectedVideoId || (ctx.url && ctx.url.includes(expectedVideoId))) {
+      return { ok: true, reason: 'verified_by_video_id', actual: ctx, expectedVideoId };
+    }
+  }
+
   if (!ctx.onWatch && !ctx.videoId) {
     return { ok: false, reason: 'not_on_watch_page', actual: ctx, expectedVideoId };
   }
@@ -396,6 +408,41 @@ function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+/** Unique natural search query per video — title keywords that match search results */
+function deriveSearchQuery(videoTitle, channelName = '', videoIndex = 0, profileId = '') {
+  const stop = new Set(['the', 'and', 'for', 'with', 'video', 'official', 'full', 'hd', 'new', 'latest', 'my', 'how', 'what']);
+  const words = normalizeText(videoTitle).split(' ').filter(w => w.length > 2 && !stop.has(w));
+  const seed = hashProfileSeed(profileId || 'x', videoIndex + 1);
+  const rng = createSeededRng(seed);
+
+  // Prefer 3–5 consecutive meaningful words from title (better list match)
+  if (words.length >= 3) {
+    const startMax = Math.max(0, words.length - 4);
+    const start = Math.floor(rng() * (startMax + 1));
+    const slice = words.slice(start, start + Math.min(5, words.length - start));
+    if (slice.length >= 3) {
+      const q = slice.join(' ');
+      if (q.length >= 8) return q.slice(0, 70);
+    }
+  }
+
+  const pick = (arr, n) => {
+    const copy = [...arr];
+    const out = [];
+    while (out.length < n && copy.length) {
+      out.push(copy.splice(Math.floor(rng() * copy.length), 1)[0]);
+    }
+    return out;
+  };
+  const kw = pick(words, Math.min(4, Math.max(3, words.length)));
+  const suffixes = ['', 'explained', 'review', '2026', 'guide'];
+  const suffix = suffixes[Math.floor(rng() * suffixes.length)];
+  const parts = [...kw];
+  if (suffix && !parts.includes(suffix)) parts.push(suffix);
+  if (channelName && rng() > 0.55) parts.push(normalizeText(channelName).split(' ')[0]);
+  return parts.filter(Boolean).join(' ').slice(0, 70) || videoTitle.slice(0, 60);
+}
+
 module.exports = {
   buildAgentConfig,
   resolveTrafficMix,
@@ -408,4 +455,5 @@ module.exports = {
   resolveWatchPercent,
   computeWatchTimeMs,
   validateProfileConfig,
+  deriveSearchQuery,
 };

@@ -1,5 +1,18 @@
 import { backendUrl } from '../services/backendOrigin';
 
+export async function fetchServerScheduleTimers(): Promise<
+  { id: string; name: string; nextRun: number; repeat: string | null }[]
+> {
+  try {
+    const res = await fetch(backendUrl('/api/schedule/timer/list'));
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchSchedulesFromServer(): Promise<unknown[] | null> {
   try {
     const res = await fetch(backendUrl('/api/schedules'));

@@ -182,6 +182,8 @@ export const useStore = create<StoreState>()(
                 ip: sp.debugPort ? `debug:${sp.debugPort}` : undefined,
                 // Track which provider this profile belongs to
                 browserType: sp.browserType,
+                folderId: (sp as any).folderId || (sp as any).folder_id || undefined,
+                folderName: (sp as any).folderName || (sp as any).folder_name || undefined,
               };
             });
 

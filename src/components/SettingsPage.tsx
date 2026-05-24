@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import {
   Save, RefreshCw, Globe, Database, Server, Shield, Eye, EyeOff, Monitor, Layers, Key, Folder,
-  Download, Upload, Zap, ExternalLink,
+  Download, Upload, Zap, ExternalLink, Brain, Bell, Send, Trash2,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { BrowserProvider, ProviderSelection } from '../services/browserProviderApi';
@@ -15,10 +15,22 @@ import {
   fetchConcurrency,
   testMoreLoginConnection,
   testMultiloginConnection,
+  testNotification,
   exportSettingsJson,
   parseSettingsImport,
 } from '../utils/settingsApi';
 import { backendUrl, getAuthHeaders } from '../services/backendOrigin';
+import {
+  loadNotificationPrefs,
+  saveNotificationPrefs,
+  type NotificationPrefs,
+} from '../utils/notificationPrefs';
+import { requestNotificationPermission } from '../services/notifications';
+import { emptyTrash } from '../utils/trashApi';
+
+function settingOn(v: boolean | string | undefined): boolean {
+  return v === true || v === 'true';
+}
 
 const PROVIDER_INFO: Record<BrowserProvider, { label: string; connection: string }> = {
   morelogin: { label: 'MoreLogin', connection: 'localhost:40000' },
@@ -40,12 +52,23 @@ export default function SettingsPage() {
   const [showMlToken, setShowMlToken] = useState(false);
   const [testingMl, setTestingMl] = useState<'morelogin' | 'multilogin' | null>(null);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testingNotify, setTestingNotify] = useState<'telegram' | 'email' | null>(null);
+  const [notifyPrefs, setNotifyPrefs] = useState<NotificationPrefs>(() => loadNotificationPrefs());
+  const [browserNotifStatus, setBrowserNotifStatus] = useState<'unknown' | 'granted' | 'denied'>('unknown');
+  const [emptyingTrash, setEmptyingTrash] = useState(false);
+  const [trashActionMsg, setTrashActionMsg] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
   const providerSynced = useRef(false);
 
   const refreshConcurrency = useCallback(async () => {
     const c = await fetchConcurrency();
     if (c) setConcurrency(c);
+  }, []);
+
+  useEffect(() => {
+    if ('Notification' in window) {
+      setBrowserNotifStatus(Notification.permission === 'granted' ? 'granted' : Notification.permission === 'denied' ? 'denied' : 'unknown');
+    }
   }, []);
 
   useEffect(() => {
@@ -108,6 +131,28 @@ export default function SettingsPage() {
         : await testMultiloginConnection(settings);
     setTestResult(r);
     setTestingMl(null);
+  };
+
+  const runNotifyTest = async (type: 'telegram' | 'email') => {
+    setTestingNotify(type);
+    setTestResult(null);
+    const r = await testNotification(type, settings);
+    setTestResult(r);
+    setTestingNotify(null);
+  };
+
+  const updateNotifyPref = <K extends keyof NotificationPrefs>(key: K, val: NotificationPrefs[K]) => {
+    setNotifyPrefs(prev => {
+      const next = { ...prev, [key]: val };
+      saveNotificationPrefs(next);
+      return next;
+    });
+  };
+
+  const enableBrowserNotifications = async () => {
+    const ok = await requestNotificationPermission();
+    setBrowserNotifStatus(ok ? 'granted' : Notification.permission === 'denied' ? 'denied' : 'unknown');
+    if (ok) updateNotifyPref('browserEnabled', true);
   };
 
   const handleImport = (file: File) => {
@@ -392,6 +437,81 @@ export default function SettingsPage() {
           </button>
         </Section>
 
+        <Section title="Multilogin Trash" icon={<Trash2 size={15} className="text-orange-400" />} note="Trash profiles count toward subscription limit — manual + auto cleanup">
+          <div className="space-y-4">
+            <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-white text-sm font-semibold">Auto purge on delete / recreate</p>
+                <p className="text-gray-500 text-xs mt-1">When ON, delete & 24/7 recycle skip trash — permanent delete (frees quota instantly).</p>
+              </div>
+              <ToggleSwitch
+                enabled={settingOn(settings.multiloginPurgeOnDelete)}
+                onChange={(v) => update('multiloginPurgeOnDelete', v)}
+              />
+            </div>
+            <div className="bg-gray-800 border border-gray-700 rounded-xl p-4">
+              <div className="flex items-center justify-between gap-4 mb-3">
+                <div>
+                  <p className="text-white text-sm font-semibold">Scheduled auto-empty trash</p>
+                  <p className="text-gray-500 text-xs mt-1">Background job permanently clears all trash profiles on interval.</p>
+                </div>
+                <ToggleSwitch
+                  enabled={settingOn(settings.multiloginAutoEmptyTrash)}
+                  onChange={(v) => update('multiloginAutoEmptyTrash', v)}
+                />
+              </div>
+              <Field
+                label="Empty trash every (hours)"
+                value={settings.multiloginAutoEmptyTrashHours}
+                onChange={(v) => update('multiloginAutoEmptyTrashHours', v)}
+                type="number"
+                desc="Requires Save Settings — server restarts the janitor timer"
+              />
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                disabled={emptyingTrash}
+                onClick={async () => {
+                  if (!window.confirm('Permanently delete ALL profiles in Multilogin trash now?')) return;
+                  setEmptyingTrash(true);
+                  setTrashActionMsg(null);
+                  const res = await emptyTrash();
+                  setEmptyingTrash(false);
+                  setTrashActionMsg(
+                    res.code === 0
+                      ? `Done — ${res.data?.deleted ?? 0} profile(s) removed from trash`
+                      : res.message || 'Empty trash failed',
+                  );
+                }}
+                className="text-xs px-4 py-2 rounded-lg bg-orange-600/30 text-orange-300 border border-orange-600/40 disabled:opacity-50"
+              >
+                {emptyingTrash ? 'Emptying…' : 'Empty trash now'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab('profiles')}
+                className="text-xs px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-400 hover:text-gray-200"
+              >
+                Open Profiles → Trash tab
+              </button>
+            </div>
+            {trashActionMsg && (
+              <p className="text-xs text-orange-300/90">{trashActionMsg}</p>
+            )}
+            <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-white text-sm font-semibold">Auto-arrange windows on one screen</p>
+                <p className="text-gray-500 text-xs mt-1">Jab 2+ profiles run hon, browser windows grid me ek display pe set ho jayengi.</p>
+              </div>
+              <ToggleSwitch
+                enabled={settingOn(settings.multiloginAutoArrangeWindows)}
+                onChange={(v) => update('multiloginAutoArrangeWindows', v)}
+              />
+            </div>
+          </div>
+        </Section>
+
         {/* Smartproxy — editable, applied to server env on save */}
         <Section title="Smartproxy (new profiles & rotate)" icon={<Server size={15} className="text-green-400" />}>
           <div className="grid grid-cols-2 gap-4">
@@ -440,6 +560,111 @@ export default function SettingsPage() {
               </div>
             ))}
           </div>
+        </Section>
+
+        {/* Notifications */}
+        <Section title="Notifications" icon={<Bell size={15} className="text-cyan-400" />} note="Browser popups (local) + Telegram instant alerts + email daily reports">
+          <div className="mb-3 flex items-center gap-2 text-xs text-amber-300/90">
+            <span className="px-2 py-0.5 rounded bg-amber-900/40 border border-amber-700/40">Coming Soon</span>
+            <span className="text-gray-500">Email daily reports &amp; scheduled digest — Telegram + browser alerts work now</span>
+          </div>
+          <div className="mb-5 p-4 bg-gray-800/60 border border-gray-700 rounded-xl space-y-3">
+            <p className="text-sm text-gray-300 font-medium">Browser notifications (free — no setup)</p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={() => void enableBrowserNotifications()}
+                className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium"
+              >
+                Allow browser notifications
+              </button>
+              <span className={`text-xs ${browserNotifStatus === 'granted' ? 'text-green-400' : browserNotifStatus === 'denied' ? 'text-red-400' : 'text-gray-500'}`}>
+                {browserNotifStatus === 'granted' ? '● Allowed' : browserNotifStatus === 'denied' ? '● Blocked — enable in browser site settings' : '● Not requested yet'}
+              </span>
+            </div>
+            <div className="grid sm:grid-cols-2 gap-2 text-sm">
+              {([
+                ['browserEnabled', 'Enable browser popups'],
+                ['onScheduleComplete', 'Schedule finished'],
+                ['onScheduleError', 'Schedule failed'],
+                ['onWorkerError', 'Worker / profile errors'],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="flex items-center gap-2 text-gray-400 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={notifyPrefs[key]}
+                    onChange={e => updateNotifyPref(key, e.target.checked)}
+                    className="rounded border-gray-600 bg-gray-900 text-cyan-500"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <p className="text-xs text-gray-500 mb-3">
+            <strong className="text-gray-400">Telegram setup:</strong> @BotFather → /newbot → copy Bot Token · Chat ID: message @userinfobot or add bot to group · Save settings, then Test.
+          </p>
+          <div className="grid md:grid-cols-2 gap-4">
+            <Field label="Telegram Bot Token" value={settings.telegramBotToken || ''} onChange={v => update('telegramBotToken', v)} mono />
+            <Field label="Telegram Chat ID" value={settings.telegramChatId || ''} onChange={v => update('telegramChatId', v)} mono />
+            <Field label="Notify Email" value={settings.notifyEmail || ''} onChange={v => update('notifyEmail', v)} />
+            <Field label="SMTP Host" value={settings.smtpHost || ''} onChange={v => update('smtpHost', v)} mono />
+            <Field label="SMTP User" value={settings.smtpUser || ''} onChange={v => update('smtpUser', v)} mono />
+            <Field label="SMTP Password" value={settings.smtpPass || ''} onChange={v => update('smtpPass', v)} mono />
+            <Field label="Mail API URL (optional)" value={settings.mailApiUrl || ''} onChange={v => update('mailApiUrl', v)} desc="HTTP POST endpoint — easiest for real email delivery" />
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              disabled={testingNotify !== null}
+              onClick={() => void runNotifyTest('telegram')}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm"
+            >
+              <Send size={14} />
+              {testingNotify === 'telegram' ? 'Sending…' : 'Test Telegram'}
+            </button>
+            <button
+              type="button"
+              disabled={testingNotify !== null}
+              onClick={() => void runNotifyTest('email')}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white text-sm"
+            >
+              <Send size={14} />
+              {testingNotify === 'email' ? 'Sending…' : 'Test Email'}
+            </button>
+          </div>
+          <p className="text-xs text-gray-600 mt-3">
+            Backend auto-sends: schedule complete, YT agent errors, circuit breaker, high RAM, daily analytics (when Telegram/email configured).
+          </p>
+        </Section>
+
+        {/* AI Brain */}
+        <Section title="AI Brain (Claude Haiku)" icon={<Brain size={15} className="text-pink-400" />} note="Adds Claude-powered decisions to each profile — search query, read depth, next action. Without key, uses persona system.">
+          <div>
+            <label className="text-gray-400 text-xs block mb-1.5">Anthropic API Key</label>
+            <input
+              type="password"
+              value={settings.anthropicApiKey || ''}
+              onChange={(e) => update('anthropicApiKey', e.target.value)}
+              placeholder="sk-ant-api03-..."
+              className="w-full bg-gray-900 border border-gray-700 text-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono"
+            />
+            <p className="text-xs text-gray-500 mt-2">
+              Get key: <span className="text-pink-400">console.anthropic.com → API Keys → Create key</span> · Cost: ~$0.25/million tokens · Max 25 calls/session per profile
+            </p>
+          </div>
+          {settings.anthropicApiKey ? (
+            <div className="mt-3 flex items-center gap-2 bg-pink-900/20 border border-pink-700/30 rounded-xl px-3 py-2">
+              <Brain size={13} className="text-pink-400" />
+              <span className="text-xs text-pink-300">AI Brain enabled — Claude Haiku will guide profile decisions</span>
+            </div>
+          ) : (
+            <div className="mt-3 flex items-center gap-2 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2">
+              <Brain size={13} className="text-gray-500" />
+              <span className="text-xs text-gray-500">No key — using persona system (Researcher, Casual, Skimmer, etc.)</span>
+            </div>
+          )}
         </Section>
 
         <GitPushSection />

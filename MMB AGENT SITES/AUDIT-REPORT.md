@@ -33,11 +33,11 @@
 
 ---
 
-### BUG #3: Hardcoded OLD API Key (401 Error)
+### BUG #3: Legacy hardcoded MoreLogin keys (historical note)
 **Files:** `server/index.cjs`, `vite.config.ts`
-**Problem:** Both files have the OLD MoreLogin API key: `0df5ef07ccfd376ba7461deab39c040f6f80db8fc5829bfd`
-**Impact:** All MoreLogin API calls will return 401 Unauthorized.
-**Fix:** Use new key `dbc21d41137f29238f4679e71b7986decb0581115e34a84e` or read from `.env`
+**Problem:** Repo used to embed API keys; never commit secrets to git.
+**Impact:** Unauthorized use if keys leak.
+**Fix:** Use Settings UI (`data/settings.json`, local only) plus optional `VITE_MORELOGIN_API_KEY` / `.env` — keys never in source control.
 
 ---
 

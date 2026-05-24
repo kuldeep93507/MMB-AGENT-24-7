@@ -44,6 +44,7 @@ export interface Video {
   created_at: number;
   thumbnail?: string;
   likes?: number;
+  priority?: 'high' | 'normal';
 }
 
 export interface Playlist {
@@ -110,7 +111,15 @@ function youtubeVideoToVideo(ytVideo: YouTubeVideo, channelDbId: number): Video 
     created_at: Date.now(),
     thumbnail: ytVideo.thumbnail,
     likes: ytVideo.likes,
+    priority: 'normal',
   };
+}
+
+const MANUAL_CHANNEL_NAME = 'Manual Videos';
+
+function parseYtVideoId(url: string): string | null {
+  const m = url.match(/(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+  return m ? m[1] : null;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -435,6 +444,82 @@ export function useChannelStore() {
     }));
   }, []);
 
+  const ensureManualChannel = useCallback((): number => {
+    const existing = channels.find(c => c.channel_name === MANUAL_CHANNEL_NAME);
+    if (existing) return existing.id;
+    autoIncrement.channel++;
+    const ch: Channel = {
+      id: autoIncrement.channel,
+      channel_id: `manual_${Date.now()}`,
+      channel_name: MANUAL_CHANNEL_NAME,
+      channel_handle: '@manual',
+      channel_url: '',
+      subscriber_count: 0,
+      status: 'active',
+      auto_sync: 'manual',
+      last_sync: Date.now(),
+      total_videos: 0,
+      created_at: Date.now(),
+    };
+    setChannels(prev => [...prev, ch]);
+    return ch.id;
+  }, [channels]);
+
+  const addManualVideo = useCallback((url: string, title: string, priority: 'high' | 'normal' = 'normal'): Video | null => {
+    const videoId = parseYtVideoId(url);
+    if (!videoId) return null;
+    if (videos.some(v => v.video_id === videoId)) return null;
+    const channelId = ensureManualChannel();
+    autoIncrement.video++;
+    const v: Video = {
+      id: autoIncrement.video,
+      channel_id: channelId,
+      video_id: videoId,
+      title,
+      url: url.includes('http') ? url : `https://www.youtube.com/watch?v=${videoId}`,
+      duration: 0,
+      views: 0,
+      upload_date: Date.now(),
+      is_enabled: 1,
+      is_new: 1,
+      watch_count: 0,
+      last_watched: null,
+      status: 'available',
+      created_at: Date.now(),
+      priority,
+    };
+    setVideos(prev => [v, ...prev]);
+    addToast(`Video added: ${title}`, 'success');
+    return v;
+  }, [videos, ensureManualChannel, addToast]);
+
+  const deleteVideoById = useCallback((id: number) => {
+    setVideos(prev => prev.filter(v => v.id !== id));
+    addToast('Video removed', 'info');
+  }, [addToast]);
+
+  const setVideoPriority = useCallback((id: number, priority: 'high' | 'normal') => {
+    setVideos(prev => prev.map(v => v.id === id ? { ...v, priority } : v));
+  }, []);
+
+  const shuffleVideos = useCallback(() => {
+    setVideos(prev => {
+      const a = [...prev];
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    });
+    addToast('Video order shuffled', 'info');
+  }, [addToast]);
+
+  const forceSyncToServer = useCallback(async () => {
+    const ok = await saveChannelsBundleToServer({ channels, videos, playlists });
+    addToast(ok ? 'Videos server pe sync ho gaye' : 'Server sync fail', ok ? 'success' : 'error');
+    return ok;
+  }, [channels, videos, playlists, addToast]);
+
   return {
     channels,
     videos,
@@ -458,5 +543,10 @@ export function useChannelStore() {
     addPlaylist,
     deletePlaylist,
     togglePlaylist,
+    addManualVideo,
+    deleteVideoById,
+    setVideoPriority,
+    shuffleVideos,
+    forceSyncToServer,
   };
 }

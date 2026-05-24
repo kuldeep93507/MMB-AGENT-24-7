@@ -19,6 +19,7 @@ const path = require('path');
 const { ProfileAgent } = require('./agent.cjs');
 const { Orchestrator } = require('./orchestrator.cjs');
 const { profileRouter } = require('../../server/providers/profileRouter.cjs');
+const { runBacklinkBuilder } = require('./backlinkBuilder.cjs');
 
 const app = express();
 app.use(cors());
@@ -32,8 +33,66 @@ const activeAgents = new Map();
 const orchestrator = new Orchestrator();
 const runningSchedules = new Map();
 const cancelledSchedules = new Set();
-// Cache: profileId → cdpPort (set on successful start, used when "already running")
-const cdpPortCache = new Map();
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CDP PORT CACHE — persisted to disk so server restarts don't lose port knowledge
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const CDP_CACHE_FILE = path.join(__dirname, '..', 'data', 'cdp_ports.json');
+
+function _loadCdpCache() {
+  try {
+    if (fs.existsSync(CDP_CACHE_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(CDP_CACHE_FILE, 'utf8'));
+      return new Map(Object.entries(raw).map(([k, v]) => [k, Number(v)]));
+    }
+  } catch {}
+  return new Map();
+}
+
+function _saveCdpCache() {
+  try {
+    const obj = {};
+    cdpPortCache.forEach((port, id) => { obj[id] = port; });
+    fs.writeFileSync(CDP_CACHE_FILE, JSON.stringify(obj, null, 2));
+  } catch {}
+}
+
+// Cache: profileId → cdpPort (set on successful start, persisted to disk)
+const cdpPortCache = _loadCdpCache();
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// PROFILE QUEUE — prevents overwhelming Multilogin regardless of how many profiles
+// Profiles queue and start as slots free up
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class ProfileQueue {
+  constructor(maxConcurrent = 5) {
+    this.max     = maxConcurrent;
+    this.running = 0;
+    this.waiters = [];
+  }
+
+  async acquire() {
+    if (this.running < this.max) {
+      this.running++;
+      return;
+    }
+    await new Promise(resolve => this.waiters.push(resolve));
+    this.running++;
+  }
+
+  release() {
+    this.running = Math.max(0, this.running - 1);
+    if (this.waiters.length > 0) this.waiters.shift()();
+  }
+
+  async run(fn) {
+    await this.acquire();
+    try { return await fn(); }
+    finally { this.release(); }
+  }
+}
+
+const launchQueue = new ProfileQueue(5); // Max 5 simultaneous Multilogin launches
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // PERSISTENT DATA FILES
@@ -88,22 +147,22 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 const DEFAULT_SETTINGS = {
   // MoreLogin
-  moreloginApiKey:           '0df5ef07ccfd376ba7461deab39c040f6f80db8fc5829bfd',
+  moreloginApiKey:           '',
   moreloginPort:             '40000',
   moreloginSecurityEnabled:  true,
   // Multilogin
   multiloginEmail:    '',
   multiloginPassword: '',
   multiloginToken:    '',
-  multiloginFolderId: 'fb5dbb2c-c1dc-45ee-9fa1-f34819d84bf2',
+  multiloginFolderId: '',
   // AdsPower
   adspowerApiKey: '',
   adspowerPort:   '50325',
   // Proxy
   proxyServer:   'us.smartproxy.net',
   proxyPort:     '3120',
-  proxyPassword: 'xEdCpOSFn3nd4ixu',
-  proxyPrefix:   'smart-pwgbkxcy3lyi',
+  proxyPassword: '',
+  proxyPrefix:   '',
   defaultProxyLife: '4hr',
   // Automation
   startDelay:     '5000',
@@ -111,10 +170,12 @@ const DEFAULT_SETTINGS = {
   maxConcurrent:  '5',
   maxRetries:     '3',
   backendPort:    '3200',
-  // Cron
+  // Cron — supports any valid cron expression (min interval: */15 * * * *)
   cronEnabled:  false,
-  cronSchedule: '0 9 * * *',
+  cronSchedule: '*/30 * * * *',
   cronAction:   'start_all',
+  // AI Brain
+  anthropicApiKey: '',
 };
 
 function loadAppSettings() {
@@ -131,14 +192,32 @@ function applySettingsToEnv(s) {
   if (s.moreloginPort)      process.env.MORELOGIN_PORT         = s.moreloginPort;
   if (s.multiloginEmail)    process.env.MULTILOGIN_EMAIL       = s.multiloginEmail;
   if (s.multiloginPassword) process.env.MULTILOGIN_PASSWORD    = s.multiloginPassword;
-  // Always set/clear token so empty string removes a previously-set fake token
-  process.env.MULTILOGIN_TOKEN = s.multiloginToken || '';
+  // Only override token if settings has one — otherwise keep the .env value intact
+  if (s.multiloginToken) process.env.MULTILOGIN_TOKEN = s.multiloginToken;
   if (s.multiloginFolderId) process.env.MULTILOGIN_FOLDER_ID   = s.multiloginFolderId;
+  // Proxy settings — MultiloginProvider reads these from process.env at call time
+  if (s.proxyServer)   process.env.PROXY_SERVER   = s.proxyServer;
+  if (s.proxyPort)     process.env.PROXY_PORT      = s.proxyPort;
+  if (s.proxyPrefix)   process.env.PROXY_PREFIX    = s.proxyPrefix;
+  if (s.proxyPassword) process.env.PROXY_PASSWORD  = s.proxyPassword;
+  // AI Brain — set/clear so AIBrain.cjs reads it at session time
+  process.env.ANTHROPIC_API_KEY = s.anthropicApiKey || '';
+  // Convert '4hr' → '240' minutes for Smartproxy session life
+  if (s.defaultProxyLife) {
+    const match = String(s.defaultProxyLife).match(/(\d+(\.\d+)?)/);
+    if (match) {
+      const hrs = parseFloat(match[1]);
+      process.env.PROXY_LIFE_MINUTES = String(Math.round(hrs * 60));
+    }
+  }
 }
 
 let appSettings = loadAppSettings();
 applySettingsToEnv(appSettings);   // Apply on startup — overrides .env if settings.json exists
 
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function randomDelay(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function rand(min, max) { return randomDelay(min, max); }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MORELOGIN API HELPER
@@ -147,7 +226,7 @@ function moreloginRequest(endpoint, body) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     // Always read from appSettings so UI changes take effect immediately
-    const apiKey = appSettings.moreloginApiKey || 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e';
+    const apiKey = appSettings.moreloginApiKey || '';
     const mlPort = parseInt(appSettings.moreloginPort, 10) || 40000;
     const options = {
       hostname: '127.0.0.1',
@@ -342,7 +421,9 @@ app.post('/api/scheduler/run', async (req, res) => {
     if (existing) existing.progress.push(progressEntry);
 
     try {
-      const debugPort = await startProfileForSchedule(profileId, provider);
+      // Queue-based launch — if >5 profiles launching at once, wait for a slot
+      // This prevents overwhelming Multilogin regardless of profile count
+      const debugPort = await launchQueue.run(() => startProfileForSchedule(profileId, provider));
 
       if (debugPort) {
         progressEntry.status = 'connected';
@@ -398,22 +479,28 @@ app.post('/api/scheduler/run', async (req, res) => {
                 // Analytics — totals
                 analyticsData.totalReads++;
                 analyticsData.totalDwellTime += dwell;
+                analyticsData.adImpressions += (r.result.adHitCount || 0);
 
                 // Traffic source — correctly mapped
                 const srcKey = ['google','bing','duckduckgo','yahoo','direct','internal','backlink','social'].includes(src) ? src : 'direct';
                 analyticsData.trafficSources[srcKey] = (analyticsData.trafficSources[srcKey] || 0) + 1;
 
                 // Per-profile
-                if (!analyticsData.perProfile[profileId]) analyticsData.perProfile[profileId] = { reads: 0, dwellTime: 0 };
+                if (!analyticsData.perProfile[profileId]) analyticsData.perProfile[profileId] = { reads: 0, dwellTime: 0, comments: 0, sessions: 0 };
                 analyticsData.perProfile[profileId].reads++;
                 analyticsData.perProfile[profileId].dwellTime += dwell;
 
-                // Per-site
+                // Per-site — save by both hostname AND siteUrl so frontend can find it
                 try {
                   const siteHost = new URL(r.article.url).hostname;
-                  if (!analyticsData.perSite[siteHost]) analyticsData.perSite[siteHost] = { reads: 0, dwellTime: 0 };
-                  analyticsData.perSite[siteHost].reads++;
-                  analyticsData.perSite[siteHost].dwellTime += dwell;
+                  const siteUrl = r.article.siteUrl || '';
+                  const siteKeys = [siteHost];
+                  if (siteUrl) { try { siteKeys.push(new URL(siteUrl).hostname); } catch {} }
+                  for (const key of [...new Set(siteKeys)]) {
+                    if (!analyticsData.perSite[key]) analyticsData.perSite[key] = { reads: 0, dwellTime: 0 };
+                    analyticsData.perSite[key].reads++;
+                    analyticsData.perSite[key].dwellTime += dwell;
+                  }
                 } catch {}
 
                 analyticsData.recentActivity.unshift({ profileId, url: r.article.url, title: r.article.title, dwellTime: dwell, trafficSource: src, readAt: Date.now() });
@@ -437,24 +524,66 @@ app.post('/api/scheduler/run', async (req, res) => {
       } else {
         progressEntry.status = 'error';
         console.error(`[Schedule] Profile ${profileId}: Could not get debug port`);
+        // Still try to close even if we never got a port
+        await closeProfileForSchedule(profileId, provider).catch(() => {});
       }
     } catch (err) {
       progressEntry.status = 'error';
       console.error(`[Schedule] Profile ${profileId} error: ${err.message}`);
+      // Always close browser on error — prevents zombie browser windows
+      try {
+        const agent = activeAgents.get(profileId);
+        if (agent) { await agent.disconnect().catch(() => {}); activeAgents.delete(profileId); }
+        await closeProfileForSchedule(profileId, provider).catch(() => {});
+      } catch {}
     }
     progressEntry.completedAt = Date.now();
   }
 
   const concurrent = schedule.concurrent !== false; // default: all profiles run in parallel
-  console.log(`Mode: ${concurrent ? 'CONCURRENT' : 'sequential'}`);
+  // Max profiles running at same time — prevents launcher from being overwhelmed
+  const maxConcurrent = Math.min(schedule.maxConcurrent || 5, 10);
+  console.log(`Mode: ${concurrent ? `CONCURRENT (max ${maxConcurrent} at a time)` : 'sequential'}`);
+
+  // Batched parallel runner — starts all profiles in small batches with gaps between batches
+  // All profiles run simultaneously once started — only the START is staggered
+  async function runBatchedParallel(profileIds) {
+    const batchSize = maxConcurrent; // e.g. 5 per batch
+    const batchGapMs = 30000; // 30s between batches — Multilogin needs time to fully launch batch 1
+    const withinBatchGapMs = 2000; // 2s between starts within a batch
+
+    const allTasks = [];
+
+    for (let b = 0; b < profileIds.length; b += batchSize) {
+      const batch = profileIds.slice(b, b + batchSize);
+      const batchNum = Math.floor(b / batchSize) + 1;
+      console.log(`[Schedule] Batch ${batchNum}: starting ${batch.length} profiles...`);
+
+      for (let j = 0; j < batch.length; j++) {
+        if (cancelledSchedules.has(scheduleId)) break;
+        const profileId = batch[j];
+        // Small gap between starts within same batch
+        const withinDelay = j * withinBatchGapMs;
+        const task = sleep(withinDelay).then(() =>
+          runProfileTask(profileId, scheduleId, schedule, provider)
+        );
+        allTasks.push(task);
+      }
+
+      // Wait between batches (but not after last batch)
+      if (b + batchSize < profileIds.length && !cancelledSchedules.has(scheduleId)) {
+        console.log(`[Schedule] Waiting ${batchGapMs / 1000}s before next batch...`);
+        await sleep(batchGapMs);
+      }
+    }
+
+    // All profiles now running in parallel — wait for ALL to complete
+    await Promise.allSettled(allTasks);
+  }
 
   (async () => {
     if (concurrent) {
-      // All profiles start at the same time (true parallel)
-      await Promise.all(profiles.map(profileId => {
-        if (cancelledSchedules.has(scheduleId)) return Promise.resolve();
-        return runProfileTask(profileId, scheduleId, schedule, provider);
-      }));
+      await runBatchedParallel(profiles);
     } else {
       for (let i = 0; i < profiles.length; i++) {
         if (cancelledSchedules.has(scheduleId)) {
@@ -528,8 +657,12 @@ function getArticlesForProfile(profileId, schedule) {
   }
   if (schedule.perProfile) {
     const pp = schedule.perProfile.find(p => p.profileId === profileId);
-    if (pp && pp.backlinks) {
-      return pp.backlinks.map(b => ({ url: b.targetArticleUrl || b.sourceUrl, title: b.targetArticleUrl || 'Backlink' }));
+    if (pp) {
+      // BacklinkPoolPage sends pp.articles; old format used pp.backlinks
+      if (Array.isArray(pp.articles) && pp.articles.length > 0) return pp.articles;
+      if (Array.isArray(pp.backlinks) && pp.backlinks.length > 0) {
+        return pp.backlinks.map(b => ({ url: b.targetArticleUrl || b.sourceUrl, title: b.targetArticleUrl || 'Backlink', siteUrl: b.siteUrl || '' }));
+      }
     }
   }
   // Articles pre-resolved by the frontend from selected sites
@@ -539,9 +672,28 @@ function getArticlesForProfile(profileId, schedule) {
   return [];
 }
 
+// Poll a CDP port until it responds or timeout — browser needs time to fully start
+async function pollCdpPort(port, timeoutMs = 45000, intervalMs = 2000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const alive = await new Promise(resolve => {
+      const req = http.get({ hostname: '127.0.0.1', port, path: '/json/version', timeout: 2000 }, res => {
+        res.resume();
+        resolve(res.statusCode < 500);
+      });
+      req.on('error', () => resolve(false));
+      req.on('timeout', () => { req.destroy(); resolve(false); });
+    });
+    if (alive) return true;
+    await sleep(intervalMs);
+  }
+  return false;
+}
+
 // Helper: start a profile via the correct provider, return debugPort/cdpPort
 async function startProfileForSchedule(profileId, provider) {
   const prov = provider || 'morelogin';
+
   if (prov === 'morelogin') {
     const statusRes = await moreloginRequest('/api/env/status', { envId: profileId });
     if (statusRes.code === 0 && statusRes.data?.status === 'running' && statusRes.data?.debugPort) {
@@ -553,32 +705,91 @@ async function startProfileForSchedule(profileId, provider) {
     const retry = await moreloginRequest('/api/env/status', { envId: profileId });
     return (retry.code === 0 && retry.data?.debugPort) ? retry.data.debugPort : null;
   }
-  // All other providers (multilogin, adspower) via providerFactory
+
+  // Multilogin / AdsPower via providerFactory
   try {
     const { providerFactory } = require('../../server/providers/ProviderFactory.cjs');
     const provInst = providerFactory.getProvider(prov);
-    const startRes = await provInst.startProfile(profileId);
+
+    // ── ATTEMPT 1: Normal start ──
+    let startRes = await provInst.startProfile(profileId);
+
     if (startRes.code === 0 && startRes.data?.cdpPort) {
-      cdpPortCache.set(profileId, startRes.data.cdpPort); // cache for future "already running" retries
-      return startRes.data.cdpPort;
+      const port = startRes.data.cdpPort;
+      cdpPortCache.set(profileId, port);
+      _saveCdpCache(); // persist to disk immediately
+      console.log(`[scheduler] ${prov} ${profileId.slice(-4)} started → port ${port}, waiting for CDP...`);
+      // Browser takes time to fully start — poll until port responds (up to 45s)
+      const ready = await pollCdpPort(port, 45000);
+      if (ready) {
+        console.log(`[scheduler] CDP port ${port} ready ✓`);
+        return port;
+      }
+      console.warn(`[scheduler] CDP port ${port} not responding after 45s — retrying start...`);
     }
-    // Profile already running — check CDP port cache first, then verify port is live
+
+    // ── ATTEMPT 2: Check cache (profile already running from previous session) ──
     const cached = cdpPortCache.get(profileId);
     if (cached) {
-      const alive = await new Promise(resolve => {
-        const req = http.get({ hostname: '127.0.0.1', port: cached, path: '/json', timeout: 2000 }, () => resolve(true));
-        req.on('error', () => resolve(false));
-        req.on('timeout', () => { req.destroy(); resolve(false); });
-      });
+      const alive = await pollCdpPort(cached, 5000, 1000);
       if (alive) {
-        console.log(`[scheduler] ${prov} profile ${profileId.slice(-4)} already running — using cached CDP port ${cached}`);
+        console.log(`[scheduler] ${prov} ${profileId.slice(-4)} using cached CDP port ${cached}`);
         return cached;
       }
+      cdpPortCache.delete(profileId); // stale cache — clear it
     }
-    console.error(`[scheduler] startProfile via ${prov} failed: ${startRes.message}`);
+
+    // ── ATTEMPT 3: Stop stale state + fresh start ──
+    console.log(`[scheduler] ${prov} ${profileId.slice(-4)} — stopping stale state and restarting...`);
+    try { await provInst.stopProfile(profileId); } catch {}
+    await sleep(5000);
+
+    startRes = await provInst.startProfile(profileId);
+    if (startRes.code === 0 && startRes.data?.cdpPort) {
+      const port = startRes.data.cdpPort;
+      cdpPortCache.set(profileId, port);
+      _saveCdpCache();
+      console.log(`[scheduler] Retry started → port ${port}, polling...`);
+      const ready = await pollCdpPort(port, 45000);
+      if (ready) {
+        console.log(`[scheduler] CDP port ${port} ready after retry ✓`);
+        return port;
+      }
+    }
+
+    // ── ATTEMPT 4: Scan common Multilogin port range ──
+    // Multilogin uses ports in 35000-65000 range for CDP
+    console.log(`[scheduler] ${prov} ${profileId.slice(-4)} — scanning ports for running browser...`);
+    for (const rangeStart of [35000, 40000, 45000, 50000, 55000, 60000]) {
+      for (let p = rangeStart; p < rangeStart + 500; p++) {
+        const found = await new Promise(resolve => {
+          const req = http.get({ hostname: '127.0.0.1', port: p, path: '/json/version', timeout: 400 }, res => {
+            let d = '';
+            res.on('data', c => d += c);
+            res.on('end', () => {
+              try {
+                const j = JSON.parse(d);
+                // Verify this is a Multilogin browser (check for webSocketDebuggerUrl)
+                resolve(j.webSocketDebuggerUrl || j.Browser ? p : false);
+              } catch { resolve(false); }
+            });
+          });
+          req.on('error', () => resolve(false));
+          req.on('timeout', () => { req.destroy(); resolve(false); });
+        });
+        if (found) {
+          console.log(`[scheduler] Found browser on port ${found} via scan!`);
+          cdpPortCache.set(profileId, found);
+          _saveCdpCache();
+          return found;
+        }
+      }
+    }
+
+    console.error(`[scheduler] ${prov} ${profileId.slice(-4)} — all strategies failed: ${startRes.message}`);
     return null;
   } catch (e) {
-    console.error(`[scheduler] startProfile via ${prov} failed: ${e.message}`);
+    console.error(`[scheduler] startProfile ${prov} ${profileId.slice(-4)} error: ${e.message}`);
     return null;
   }
 }
@@ -836,6 +1047,189 @@ app.post('/api/manual/batch', async (req, res) => {
 
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BEHAVIOR RECORDING / REPLAY
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const BEHAVIORS_FILE = path.join(DATA_DIR, 'behaviors.json');
+
+function loadBehaviors() {
+  try { if (fs.existsSync(BEHAVIORS_FILE)) return JSON.parse(fs.readFileSync(BEHAVIORS_FILE, 'utf8')); } catch {}
+  return [];
+}
+function saveBehaviors(behaviors) {
+  try { fs.writeFileSync(BEHAVIORS_FILE, JSON.stringify(behaviors, null, 2)); } catch {}
+}
+
+// POST /api/behavior/record — inject JS capture script into a running profile's browser
+// The browser captures mouse/scroll events for N seconds, then POSTs them back
+app.post('/api/behavior/record', async (req, res) => {
+  const { profileId, durationSec = 30, name = 'Recording ' + new Date().toLocaleTimeString() } = req.body || {};
+  if (!profileId) return res.status(400).json({ error: 'profileId required' });
+
+  const cdpPort = cdpPortCache.get(profileId);
+  if (!cdpPort) return res.status(400).json({ error: 'Profile not running — start it first via scheduler or Profiles page' });
+
+  try {
+    const { chromium } = require('playwright-core');
+    const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`, { timeout: 8000 });
+    const ctx = browser.contexts()[0];
+    if (!ctx) { browser.close().catch(() => {}); return res.status(400).json({ error: 'No browser context' }); }
+    const page = ctx.pages()[0];
+    if (!page) { browser.close().catch(() => {}); return res.status(400).json({ error: 'No page found' }); }
+
+    // Inject capture script — captures mouse moves, clicks, scroll, key events
+    const captureScript = `
+      (function() {
+        window.__mbmEvents = [];
+        const t0 = Date.now();
+        const record = (type, data) => {
+          window.__mbmEvents.push({ type, ms: Date.now() - t0, ...data });
+          if (window.__mbmEvents.length > 5000) window.__mbmEvents.shift(); // cap at 5000
+        };
+        const onmm = e => record('mousemove', { x: e.clientX, y: e.clientY });
+        const onclick = e => record('click', { x: e.clientX, y: e.clientY, btn: e.button });
+        const onscroll = () => record('scroll', { y: window.scrollY });
+        const onkey = e => record('keydown', { key: e.key });
+        document.addEventListener('mousemove', onmm, { passive: true });
+        document.addEventListener('click', onclick, { passive: true });
+        document.addEventListener('scroll', onscroll, { passive: true });
+        document.addEventListener('keydown', onkey, { passive: true });
+        window.__mbmStopCapture = () => {
+          document.removeEventListener('mousemove', onmm);
+          document.removeEventListener('click', onclick);
+          document.removeEventListener('scroll', onscroll);
+          document.removeEventListener('keydown', onkey);
+          return window.__mbmEvents;
+        };
+        console.log('[MBM] Behavior capture started for ${durationSec}s');
+      })();
+    `;
+    await page.evaluate(captureScript).catch(() => {});
+
+    res.json({ success: true, message: `Recording for ${durationSec}s — perform your natural browsing now` });
+
+    // Collect after duration
+    setTimeout(async () => {
+      try {
+        const events = await page.evaluate(() => window.__mbmStopCapture ? window.__mbmStopCapture() : []).catch(() => []);
+        if (events && events.length > 0) {
+          const behaviors = loadBehaviors();
+          const id = 'beh_' + Date.now().toString(36);
+          behaviors.push({ id, name, profileId, capturedAt: Date.now(), durationSec, eventCount: events.length, events });
+          if (behaviors.length > 20) behaviors.splice(0, behaviors.length - 20); // keep last 20
+          saveBehaviors(behaviors);
+          console.log(`[Behavior] Saved "${name}" — ${events.length} events`);
+        }
+      } catch (e) { console.error('[Behavior] Save error:', e.message); }
+      browser.close().catch(() => {});
+    }, durationSec * 1000);
+
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/behavior/list — list saved behaviors
+app.get('/api/behavior/list', (req, res) => {
+  const behaviors = loadBehaviors().map(({ id, name, profileId, capturedAt, durationSec, eventCount }) =>
+    ({ id, name, profileId, capturedAt, durationSec, eventCount })
+  );
+  res.json({ behaviors });
+});
+
+// POST /api/behavior/replay — replay a saved behavior in a running profile
+app.post('/api/behavior/replay', async (req, res) => {
+  const { profileId, behaviorId, speedMultiplier = 1.0 } = req.body || {};
+  if (!profileId || !behaviorId) return res.status(400).json({ error: 'profileId and behaviorId required' });
+
+  const cdpPort = cdpPortCache.get(profileId);
+  if (!cdpPort) return res.status(400).json({ error: 'Profile not running' });
+
+  const behavior = loadBehaviors().find(b => b.id === behaviorId);
+  if (!behavior) return res.status(404).json({ error: 'Behavior not found' });
+
+  res.json({ success: true, message: `Replaying "${behavior.name}" (${behavior.eventCount} events)` });
+
+  // Replay async
+  (async () => {
+    try {
+      const { chromium } = require('playwright-core');
+      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`, { timeout: 8000 });
+      const ctx = browser.contexts()[0];
+      const page = ctx?.pages()[0];
+      if (!page) { browser.close().catch(() => {}); return; }
+
+      const events = behavior.events;
+      let lastMs = 0;
+      for (const ev of events) {
+        const gap = Math.max(0, (ev.ms - lastMs) / speedMultiplier);
+        if (gap > 0) await sleep(Math.min(gap, 2000)); // cap individual gaps at 2s
+        lastMs = ev.ms;
+        try {
+          if (ev.type === 'mousemove') await page.mouse.move(ev.x, ev.y).catch(() => {});
+          else if (ev.type === 'click') await page.mouse.click(ev.x, ev.y).catch(() => {});
+          else if (ev.type === 'scroll') await page.evaluate(y => window.scrollTo(0, y), ev.y).catch(() => {});
+        } catch {}
+      }
+      console.log(`[Behavior] Replay of "${behavior.name}" complete`);
+      browser.close().catch(() => {});
+    } catch (e) { console.error('[Behavior] Replay error:', e.message); }
+  })();
+});
+
+// DELETE /api/behavior/:id — delete a saved behavior
+app.delete('/api/behavior/:id', (req, res) => {
+  const { id } = req.params;
+  const behaviors = loadBehaviors().filter(b => b.id !== id);
+  saveBehaviors(behaviors);
+  res.json({ success: true });
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BACKLINK BUILDER — WordPress Comment Backlinks
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.post('/api/backlink/build', async (req, res) => {
+  const { profileIds, targetSiteUrl, maxBlogsPerProfile, submitEnabled, provider } = req.body;
+  if (!profileIds?.length || !targetSiteUrl) {
+    return res.status(400).json({ error: 'profileIds and targetSiteUrl required' });
+  }
+
+  const runId = 'bl_' + Date.now().toString(36);
+  console.log(`\n━━━ Backlink Builder Run [${runId}] ━━━`);
+  console.log(`Target: ${targetSiteUrl} | Profiles: ${profileIds.length} | maxBlogs: ${maxBlogsPerProfile || 5}`);
+
+  res.json({ success: true, runId, message: `Backlink builder started for ${profileIds.length} profiles` });
+
+  // Run async (non-blocking) — results logged to console
+  (async () => {
+    const prov = provider || appSettings.browserProvider || 'multilogin';
+
+    for (let i = 0; i < profileIds.length; i++) {
+      const profileId = profileIds[i];
+      if (i > 0) await sleep(rand(8000, 20000)); // stagger between profiles
+
+      try {
+        const debugPort = await launchQueue.run(() => startProfileForSchedule(profileId, prov));
+        if (!debugPort) {
+          console.error(`[BacklinkBuilder] Profile ${profileId.slice(-4)}: could not get CDP port`);
+          continue;
+        }
+
+        const result = await runBacklinkBuilder(profileId, debugPort, targetSiteUrl, {
+          maxBlogs:      maxBlogsPerProfile || 5,
+          submitEnabled: submitEnabled !== false,
+        });
+
+        console.log(`[BacklinkBuilder] ${profileId.slice(-4)} → submitted: ${result.submitted || 0}`);
+        await closeProfileForSchedule(profileId, prov).catch(() => {});
+      } catch (e) {
+        console.error(`[BacklinkBuilder] Profile ${profileId.slice(-4)} error: ${e.message}`);
+      }
+    }
+    console.log(`\n━━━ Backlink Builder [${runId}] Complete ━━━\n`);
+  })();
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // RATE LIMITS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 app.post('/api/rate-limit/check', (req, res) => {
@@ -1014,6 +1408,9 @@ app.post('/api/settings', (req, res) => {
     const { providerFactory } = require('../../server/providers/ProviderFactory.cjs');
     providerFactory.clearCache();
   } catch {}
+
+  // Restart cron if enabled/schedule changed
+  if ('cronEnabled' in updates || 'cronSchedule' in updates) startCronIfEnabled();
 
   console.log('[Settings] Saved and applied:', Object.keys(updates).join(', '));
   res.json({ success: true, message: 'Settings saved and applied!' });

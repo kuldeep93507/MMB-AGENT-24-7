@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Plus, CheckSquare, Square, Play, StopCircle, Search, RefreshCw } from 'lucide-react';
+import { Plus, CheckSquare, Square, Play, StopCircle, Search, RefreshCw, Trash2, Folder } from 'lucide-react';
 import type { Profile, OS, MultiloginProxyType } from '../types';
 import ProfileCard from './ProfileCard';
 import NewProfileModal from './NewProfileModal';
@@ -23,6 +23,7 @@ interface ProfilesPageProps {
   onStartProfile: (id: string) => void;
   onStopProfile: (id: string) => void;
   onDeleteProfile: (id: string) => void;
+  onDeleteSelected?: () => void;
   onRecreateProfile: (id: string) => void;
   onToggleSelect: (id: string) => void;
   onSelectAll: () => void;
@@ -37,13 +38,15 @@ export default function ProfilesPage({
   profiles, loading, onFetchProfiles,
   onCreateProfile, onStartProfile, onStopProfile, onDeleteProfile,
   onRecreateProfile, onToggleSelect, onSelectAll, onDeselectAll,
-  onStartSelected, onStopSelected, onRenewProxy, onOpenSettings,
+  onStartSelected, onStopSelected, onRenewProxy, onOpenSettings, onDeleteSelected,
 }: ProfilesPageProps) {
   const [showNewModal, setShowNewModal] = useState(false);
   const [search, setSearch] = useState('');
   const [filterOS, setFilterOS] = useState<'All' | OS>('All');
   const [filterStatus, setFilterStatus] = useState<string>('All');
   const [filterProvider, setFilterProvider] = useState<'All' | BrowserProvider>('All');
+  const [folderFilter, setFolderFilter] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const browserProvider = useStore((state) => state.browserProvider);
   const setBrowserProvider = useStore((state) => state.setBrowserProvider);
@@ -62,8 +65,12 @@ export default function ProfilesPage({
     if (filterOS !== 'All' && p.os !== filterOS) return false;
     if (filterStatus !== 'All' && p.status !== filterStatus) return false;
     if (filterProvider !== 'All' && p.browserType !== filterProvider) return false;
+    if (folderFilter.trim() && !(p.folderId?.includes(folderFilter.trim()) || p.folderName?.toLowerCase().includes(folderFilter.trim().toLowerCase()))) return false;
     return true;
   });
+
+  // All unique folder IDs from loaded profiles
+  const folders = Array.from(new Set(profiles.map(p => p.folderId).filter(Boolean))) as string[];
 
   return (
     <div className="flex flex-col h-full">
@@ -165,6 +172,28 @@ export default function ProfilesPage({
             <StopCircle size={13} /> Stop Selected ({selectedCount})
           </button>
 
+          {/* Delete Selected — with confirm */}
+          {selectedCount > 0 && (
+            confirmDelete ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-red-400 text-xs">Delete {selectedCount} profiles?</span>
+                <button onClick={() => { onDeleteSelected?.(); setConfirmDelete(false); }}
+                  className="px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-semibold hover:bg-red-500 transition-all">
+                  Yes, Delete
+                </button>
+                <button onClick={() => setConfirmDelete(false)}
+                  className="px-3 py-1.5 rounded-xl bg-gray-700 text-gray-300 text-xs hover:bg-gray-600 transition-all">
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmDelete(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-950/50 border border-red-800/50 text-red-500 hover:bg-red-900/40 transition-all text-xs font-medium">
+                <Trash2 size={13} /> Delete Selected ({selectedCount})
+              </button>
+            )
+          )}
+
           <div className="w-px h-5 bg-gray-700 mx-1" />
 
           {/* OS Filter */}
@@ -204,13 +233,41 @@ export default function ProfilesPage({
           )}
         </div>
 
-        {/* Search */}
-        <div className="mt-3 flex items-center gap-3">
+        {/* Search + Folder Filter */}
+        <div className="mt-3 flex items-center gap-3 flex-wrap">
           <div className="relative flex-1 max-w-xs">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
             <input type="text" placeholder="Search profiles by name or IP..." value={search} onChange={e => setSearch(e.target.value)}
               className="w-full bg-gray-800 border border-gray-700 text-gray-200 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:border-green-500" />
           </div>
+
+          {/* Folder ID filter */}
+          <div className="relative">
+            <Folder size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-yellow-500" />
+            <input type="text" placeholder="Folder ID or name..." value={folderFilter} onChange={e => setFolderFilter(e.target.value)}
+              className="w-48 bg-gray-800 border border-gray-700 text-gray-200 rounded-xl pl-9 pr-3 py-2 text-xs focus:outline-none focus:border-yellow-500" />
+            {folderFilter && (
+              <button onClick={() => setFolderFilter('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300 text-xs">✕</button>
+            )}
+          </div>
+
+          {/* Folder quick-pick chips — show if profiles have folder info */}
+          {folders.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap">
+              {folders.slice(0, 5).map(fid => {
+                const folderProf = profiles.find(p => p.folderId === fid);
+                const label = folderProf?.folderName || fid.slice(0, 8);
+                return (
+                  <button key={fid} onClick={() => setFolderFilter(folderFilter === fid ? '' : fid)}
+                    className={`px-2 py-1 rounded-lg text-[10px] font-medium transition-all border
+                      ${folderFilter === fid ? 'bg-yellow-600/30 border-yellow-500/50 text-yellow-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200'}`}>
+                    <Folder size={9} className="inline mr-1" />{label}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <span className="text-gray-600 text-xs">{filtered.length} profiles shown</span>
         </div>
       </div>

@@ -12,10 +12,16 @@
 function randomDelay(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+const {
+  STOP_WORDS,
+  cleanChannelLabel,
+  verifyVideoMatch,
+  parseDurationText,
+} = require('./utils/videoMatch.cjs');
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // SEARCH QUERY GENERATOR — Escalation Levels
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const STOP_WORDS = new Set(['the', 'a', 'an', 'is', 'are', 'was', 'were', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'and', 'or', 'but', 'not', 'this', 'that', 'it', 'its', 'how', 'what', 'which', 'who', 'when', 'where', 'why', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'can', 'may', 'might', 'you', 'your', 'my', 'our', 'their', 'his', 'her']);
 
 function generateEscalationQueries(videoTitle, channelName) {
   const title = videoTitle || '';
@@ -52,63 +58,65 @@ function generateEscalationQueries(videoTitle, channelName) {
   return [level1, level2, level3, level4, level5].filter(q => q.trim().length > 3);
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// VIDEO VERIFICATION — Check before clicking
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function verifyVideoMatch(resultTitle, resultChannel, resultDuration, expectedTitle, expectedChannel, expectedDuration) {
-  const expectedWords = expectedTitle.toLowerCase().split(/\s+/).filter(w => w.length > 2 && !STOP_WORDS.has(w));
-  const resultWords = resultTitle.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-  const matchedWords = expectedWords.filter(w => resultWords.some(rw => rw.includes(w) || w.includes(rw)));
-  const titleMatchPercent = expectedWords.length > 0 ? matchedWords.length / expectedWords.length : 0;
-
-  let score = 0;
-  if (titleMatchPercent >= 0.65) score += 55;
-  else if (titleMatchPercent >= 0.5) score += 42;
-  else if (titleMatchPercent >= 0.4) score += 28;
-  else return { score, titleMatchPercent, isMatch: false };
-
-  const needChannel = !!(expectedChannel && String(expectedChannel).trim());
-  let channelOk = !needChannel;
-
-  if (needChannel && resultChannel) {
-    const expCh = expectedChannel.toLowerCase().trim();
-    const resCh = resultChannel.toLowerCase().trim();
-    if (resCh.includes(expCh) || expCh.includes(resCh)) {
-      score += 35;
-      channelOk = true;
-    } else {
-      const expParts = expCh.split(/\s+/).filter(w => w.length > 2);
-      const resParts = resCh.split(/\s+/).filter(w => w.length > 2);
-      const chRatio = expParts.length > 0
-        ? expParts.filter(w => resParts.some(r => r.includes(w) || w.includes(r))).length / expParts.length
-        : 0;
-      if (chRatio >= 0.6) {
-        score += 28;
-        channelOk = true;
-      }
-    }
-  }
-
-  if (expectedDuration > 0 && resultDuration > 0) {
-    const diff = Math.abs(expectedDuration - resultDuration);
-    if (diff < 10) score += 15;
-    else if (diff < 30) score += 8;
-  }
-
-  const isMatch = needChannel
-    ? (channelOk && titleMatchPercent >= 0.45 && score >= 62)
-    : (titleMatchPercent >= 0.5 && score >= 42);
-
-  return { score, titleMatchPercent, isMatch };
+function normalizeQueryText(q) {
+  return String(q || '').replace(/\s+/g, ' ').trim();
 }
 
-// Parse duration text like "12:34" or "1:02:34" to seconds
-function parseDurationText(text) {
-  if (!text) return 0;
-  const parts = text.trim().split(':').map(Number);
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  return 0;
+function dedupeQueries(queries) {
+  const seen = new Set();
+  const out = [];
+  for (const q of queries) {
+    const n = normalizeQueryText(q);
+    if (n.length < 4) continue;
+    const key = n.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
+  }
+  return out;
+}
+
+/**
+ * Search plan: short AI keywords → channel+title (high hit rate) → exact title.
+ * User rule: keyword fail ho to channel name title ke aage laga ke search karo.
+ */
+function buildYouTubeSearchPlan(videoTitle, channelName, searchQuerySeed, maxAttempts = 6) {
+  const title = normalizeQueryText(videoTitle);
+  const channel = normalizeQueryText(channelName);
+  const seed = normalizeQueryText(searchQuerySeed || title);
+
+  const fromSeed = generateEscalationQueries(seed, channel);
+  const fromTitle = generateEscalationQueries(title, channel);
+
+  const channelPlusTitle = [];
+  if (channel && title) {
+    const cleanTitle = title
+      .replace(/[()[\]{}|:!?—–\-]/g, ' ')
+      .replace(/\b\d{4}\b/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const keywords = cleanTitle.split(' ')
+      .filter(w => w.length > 2 && !STOP_WORDS.has(w.toLowerCase()));
+    const core3 = keywords.slice(0, 3).join(' ');
+    const core5 = keywords.slice(0, 5).join(' ');
+    const nearFull = cleanTitle.split(' ').filter(w => w.length > 1).slice(0, 12).join(' ');
+
+    if (core3) channelPlusTitle.push(`${channel} ${core3}`);
+    if (core5 && core5 !== core3) channelPlusTitle.push(`${channel} ${core5}`);
+    if (nearFull) channelPlusTitle.push(`${channel} ${nearFull}`);
+    channelPlusTitle.push(`${channel} ${title}`.slice(0, 120));
+  }
+
+  const titleExact = fromTitle[fromTitle.length - 1] || title;
+  const titleNearFull = fromTitle[fromTitle.length - 2] || titleExact;
+
+  return dedupeQueries([
+    fromSeed[0],
+    fromSeed[1],
+    ...channelPlusTitle,
+    titleNearFull,
+    titleExact,
+  ]).slice(0, Math.max(1, maxAttempts));
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -171,46 +179,214 @@ function assignTrafficSource(profileIndex, totalProfiles, hasUrl, trafficMix, tr
   return sources[index];
 }
 
+const YOUTUBE_SEARCH_FAMILY = new Set(['youtube-search', 'channel-page']);
+
+function isYouTubeSearchFamily(source) {
+  return YOUTUBE_SEARCH_FAMILY.has(source);
+}
+
+async function runPrimaryTrafficSource(page, source, ctx) {
+  const {
+    videoTitle, channelName, videoUrl, expectedDuration, profileIndex,
+    humanTypeFn, log, expectedVideoId, searchQuerySeed,
+  } = ctx;
+  const ytOpts = {
+    maxAttempts: 6,
+    searchQuerySeed: searchQuerySeed || undefined,
+  };
+
+  switch (source) {
+    case 'direct':
+      if (videoUrl) {
+        await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await sleep(randomDelay(2000, 4000));
+        log('success', '[Direct] Video opened via URL (chosen traffic)');
+        return { success: true, source: 'direct', intendedSource: source };
+      }
+      return searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, ytOpts);
+
+    case 'youtube-search':
+      return searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, {
+        ...ytOpts,
+        browseVariant: profileIndex % 5,
+        entryMethod: profileIndex % 3,
+      });
+
+    case 'google':
+      return searchGoogle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
+
+    case 'bing':
+      return searchBing(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
+
+    case 'channel-page':
+      return searchChannelPage(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
+
+    case 'duckduckgo':
+      return searchDuckDuckGo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
+
+    case 'yahoo':
+      return searchYahoo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
+
+    default:
+      return searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, ytOpts);
+  }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // YOUTUBE SEARCH WITH ESCALATION + VERIFICATION
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async function searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId) {
-  const queries = generateEscalationQueries(videoTitle, channelName);
+async function gotoYouTubeSearchResults(page, query, humanTypeFn) {
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+  try {
+    await page.goto(url, { waitUntil: 'commit', timeout: 28000 });
+  } catch {
+    if (page.url().includes('youtube.com')) {
+      const typed = await typeInSearchBar(page, query, humanTypeFn);
+      if (typed) {
+        await page.keyboard.press('Enter');
+        await sleep(randomDelay(1000, 1800));
+        return;
+      }
+    }
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {});
+  }
+  await sleep(randomDelay(500, 1100));
+}
+
+async function waitForSearchResults(page, timeoutMs = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const count = await page.evaluate(() => document.querySelectorAll('ytd-video-renderer').length).catch(() => 0);
+    if (count > 0) return true;
+    await sleep(450);
+  }
+  return false;
+}
+
+async function openVideoFromSearchResult(page, expectedVideoId, log) {
+  const inResults = await page.evaluate((vid) => {
+    for (const a of document.querySelectorAll('ytd-video-renderer a#video-title')) {
+      if ((a.getAttribute('href') || '').includes(vid)) return true;
+    }
+    return false;
+  }, expectedVideoId).catch(() => false);
+
+  if (!inResults) return false;
+
+  try {
+    await page.goto(`https://www.youtube.com/watch?v=${expectedVideoId}`, { waitUntil: 'commit', timeout: 28000 });
+  } catch {
+    return false;
+  }
+  const ok = await waitForWatchPage(page, expectedVideoId, 18000);
+  if (ok && typeof log === 'function') log('success', `[YT] Opened from search via video ID: ${expectedVideoId}`);
+  return ok;
+}
+
+async function waitForWatchPage(page, expectedVideoId, timeoutMs = 18000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const url = page.url();
+      if (expectedVideoId && url.includes(`v=${expectedVideoId}`)) return true;
+      if (expectedVideoId && url.includes(expectedVideoId)) return true;
+      const onWatch = await page.evaluate((vid) => {
+        const u = location.href || '';
+        if (vid && (u.includes(`v=${vid}`) || u.includes(vid))) return true;
+        return /\/watch|\/shorts\//.test(u);
+      }, expectedVideoId || '').catch(() => false);
+      if (onWatch && expectedVideoId) {
+        const idOnPage = await page.evaluate(() => {
+          const u = location.href;
+          const m = u.match(/[?&]v=([A-Za-z0-9_-]{11})/);
+          return m ? m[1] : '';
+        }).catch(() => '');
+        if (idOnPage === expectedVideoId) return true;
+      } else if (onWatch && !expectedVideoId) {
+        return true;
+      }
+    } catch { /* page navigating */ }
+    await sleep(500);
+  }
+  return false;
+}
+
+async function runSearchAttempt(page, query, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, scanOpts) {
+  await gotoYouTubeSearchResults(page, query, humanTypeFn);
+  const loaded = await waitForSearchResults(page, 10000);
+  if (!loaded) {
+    log('info', `[Search] Results not loaded for "${query.slice(0, 50)}" — next keyword`);
+    return false;
+  }
+  return findAndVerifyVideo(page, videoTitle, channelName, expectedDuration, log, expectedVideoId, scanOpts);
+}
+
+async function searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, options = {}) {
+  const maxAttempts = Math.max(1, Math.min(6, options.maxAttempts ?? 6));
+  const queries = buildYouTubeSearchPlan(
+    videoTitle,
+    channelName,
+    options.searchQuerySeed || videoTitle,
+    maxAttempts,
+  );
+  const scanOpts = { quick: true, maxScrolls: 2 };
 
   for (let attempt = 0; attempt < queries.length; attempt++) {
     const query = queries[attempt];
     log('info', `[Search Attempt ${attempt + 1}/${queries.length}] "${query}"${expectedVideoId ? ` [ID: ${expectedVideoId}]` : ''}`);
 
-    const currentUrl = page.url();
-    if (!currentUrl.includes('youtube.com')) {
-      await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
-      await sleep(randomDelay(2000, 3000));
+    try {
+      const found = await runSearchAttempt(
+        page, query, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, scanOpts,
+      );
+      if (found) {
+        log('success', `[Search] Found video on attempt ${attempt + 1}: "${query}"`);
+        return { success: true, source: 'youtube-search', query };
+      }
+    } catch (err) {
+      log('warn', `[Search] Attempt ${attempt + 1} error: ${err.message} — next keyword`);
     }
 
-    const searched = await typeInSearchBar(page, query, humanTypeFn);
-    if (!searched) continue;
-
-    await page.keyboard.press('Enter');
-    await sleep(randomDelay(3000, 5000));
-
-    await page.waitForSelector('ytd-video-renderer, ytd-item-section-renderer', { timeout: 10000 }).catch(() => {});
-    await sleep(randomDelay(2000, 3000));
-
-    await browseResults(page);
-
-    // Pass expectedVideoId — 100% accurate match when URL available
-    const found = await findAndVerifyVideo(page, videoTitle, channelName, expectedDuration, log, expectedVideoId);
-    if (found) {
-      log('success', `[Search] Found video on attempt ${attempt + 1}: "${query}"`);
-      return { success: true, source: 'youtube-search', query };
-    }
-
-    log('info', `[Search] Video not found with "${query}" — trying next...`);
-    await sleep(randomDelay(1000, 2000));
+    log('info', `[Search] Not in results — next keyword...`);
+    if (attempt < queries.length - 1) await sleep(randomDelay(200, 500));
   }
 
-  log('warn', '[Search] All 5 attempts failed — exact title not found in results');
+  log('warn', '[Search] All escalation queries failed — exact title not found in results');
   return { success: false, source: 'youtube-search' };
+}
+
+/** Last resort: channel + full title first, then full title alone */
+async function searchYouTubeFullTitle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId) {
+  const fullQuery = String(videoTitle || '').trim().slice(0, 120);
+  if (fullQuery.length < 5) return { success: false, source: 'youtube-search-fulltitle' };
+
+  const channel = cleanChannelLabel(channelName);
+  const queries = dedupeQueries([
+    channel ? `${channel} ${fullQuery}`.slice(0, 120) : '',
+    fullQuery,
+  ]);
+
+  const scanOpts = { quick: true, maxScrolls: 3 };
+
+  for (let i = 0; i < queries.length; i++) {
+    const query = queries[i];
+    log('info', `[Search FULL TITLE] "${query.slice(0, 70)}${query.length > 70 ? '…' : ''}"`);
+
+    try {
+      const found = await runSearchAttempt(
+        page, query, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, scanOpts,
+      );
+      if (found) {
+        log('success', '[Search FULL TITLE] Video found and clicked from results list');
+        return { success: true, source: 'youtube-search-fulltitle', query };
+      }
+    } catch (err) {
+      log('warn', `[Search FULL TITLE] Error: ${err.message}`);
+    }
+  }
+
+  log('warn', '[Search FULL TITLE] Video not found even with full title');
+  return { success: false, source: 'youtube-search-fulltitle' };
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -560,24 +736,52 @@ async function typeInSearchBar(page, query, humanTypeFn) {
   return false;
 }
 
-// Browse search results like human (scroll around before clicking)
-async function browseResults(page) {
-  const scrollDown = randomDelay(150, 500);
-  const scrollUp = randomDelay(100, 400);
-  
-  // Scroll down a bit
-  await page.mouse.wheel(0, scrollDown);
-  await sleep(randomDelay(1000, 3000));
-  
-  // Maybe scroll more
-  if (Math.random() < 0.4) {
-    await page.mouse.wheel(0, randomDelay(80, 200));
-    await sleep(randomDelay(800, 2000));
-  }
-  
-  // Scroll back up
-  await page.mouse.wheel(0, -scrollUp);
-  await sleep(randomDelay(800, 2000));
+// Browse search results like human — varied pattern per call (anti-pattern for 24/7)
+async function browseResults(page, variant = 0) {
+  const v = variant % 5;
+  const patterns = [
+    async () => {
+      await page.mouse.wheel(0, randomDelay(180, 420));
+      await sleep(randomDelay(1200, 2800));
+      await page.mouse.wheel(0, randomDelay(90, 220));
+      await sleep(randomDelay(900, 2000));
+      await page.mouse.wheel(0, -randomDelay(120, 350));
+      await sleep(randomDelay(700, 1800));
+    },
+    async () => {
+      await page.mouse.wheel(0, randomDelay(250, 550));
+      await sleep(randomDelay(1500, 3200));
+      await page.mouse.wheel(0, randomDelay(100, 280));
+      await sleep(randomDelay(1000, 2200));
+      await page.mouse.wheel(0, -randomDelay(80, 200));
+      await sleep(randomDelay(600, 1500));
+      await page.mouse.wheel(0, -randomDelay(100, 250));
+    },
+    async () => {
+      await page.mouse.move(randomDelay(200, 600), randomDelay(180, 400), { steps: randomDelay(8, 18) }).catch(() => {});
+      await sleep(randomDelay(400, 900));
+      await page.mouse.wheel(0, randomDelay(150, 380));
+      await sleep(randomDelay(1100, 2400));
+      await page.mouse.wheel(0, -randomDelay(150, 400));
+    },
+    async () => {
+      for (let i = 0; i < 2; i++) {
+        await page.mouse.wheel(0, randomDelay(120, 300));
+        await sleep(randomDelay(800, 1600));
+      }
+      await page.mouse.wheel(0, -randomDelay(200, 450));
+      await sleep(randomDelay(900, 2000));
+    },
+    async () => {
+      await page.mouse.wheel(0, randomDelay(300, 650));
+      await sleep(randomDelay(2000, 4000));
+      if (Math.random() < 0.5) await page.mouse.wheel(0, randomDelay(60, 180));
+      await sleep(randomDelay(500, 1200));
+      await page.mouse.wheel(0, -randomDelay(180, 480));
+    },
+  ];
+  await patterns[v]();
+  await sleep(randomDelay(600, 1400));
 }
 
 // Extract video ID from YouTube URL
@@ -590,32 +794,47 @@ function extractVideoId(url) {
 // Find and verify video in YouTube search results
 // RULE: Only click if EXACT title matches — never click wrong video
 // ENHANCEMENT: If expectedVideoId provided (from URL), use it for 100% accurate match
-async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuration, log, expectedVideoId) {
+async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuration, log, expectedVideoId, options = {}) {
+  const quick = !!options.quick;
+  const maxScrolls = options.maxScrolls ?? (quick ? 2 : 3);
+  const initialWait = quick ? 350 : 1500;
+  const scrollWaitMin = quick ? 500 : 1500;
+  const scrollWaitMax = quick ? 900 : 2500;
+  const clickWaitMin = quick ? 1200 : 2000;
+  const clickWaitMax = quick ? 2200 : 4000;
+
   try {
-    // Wait for results to fully render
-    await sleep(1500);
+    await sleep(initialWait);
     
-    // Check if results exist
     const hasResults = await page.evaluate(() => {
       return document.querySelectorAll('ytd-video-renderer').length;
     });
     
     if (hasResults === 0) return false;
     
-    // Scroll through results to load more (up to 3 scrolls)
-    for (let scrollAttempt = 0; scrollAttempt < 3; scrollAttempt++) {
+    for (let scrollAttempt = 0; scrollAttempt < maxScrolls; scrollAttempt++) {
+      // Fast path: video ID match in one pass (most reliable)
+      if (expectedVideoId) {
+        const navigated = await openVideoFromSearchResult(page, expectedVideoId, log);
+        if (navigated) {
+          await sleep(randomDelay(clickWaitMin, clickWaitMax));
+          return true;
+        }
+        if (typeof log === 'function') log('warn', `[YT] ID ${expectedVideoId} in results but watch page failed — continuing scan`);
+      }
+
       // Get all video results
       const results = await page.evaluate(() => {
         const videos = document.querySelectorAll('ytd-video-renderer');
         const matches = [];
         
-        for (let i = 0; i < Math.min(videos.length, 15); i++) {
+        for (let i = 0; i < Math.min(videos.length, 20); i++) {
           const el = videos[i];
           const titleEl = el.querySelector('a#video-title');
           const channelEl = el.querySelector('ytd-channel-name a, .ytd-channel-name, ytd-channel-name yt-formatted-string');
           
           const title = titleEl?.getAttribute('title') || titleEl?.textContent?.trim() || '';
-          const channel = channelEl?.textContent?.trim() || '';
+          const channel = (channelEl?.textContent || '').replace(/\s+/g, ' ').trim();
           
           matches.push({ index: i, title, channel });
         }
@@ -623,56 +842,21 @@ async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuratio
         return matches;
       });
       
-      if (!results || results.length === 0) return false;
-      
-      // Check each result for match
-      const expectedTitleClean = videoTitle.toLowerCase().trim();
+      if (!results || results.length === 0) {
+        if (scrollAttempt < maxScrolls - 1) {
+          await page.mouse.wheel(0, randomDelay(350, 650));
+          await sleep(randomDelay(scrollWaitMin, scrollWaitMax));
+        }
+        continue;
+      }
 
       for (const result of results) {
-        const resultTitleClean = result.title.toLowerCase().trim();
-
-        // ── VIDEO ID CHECK (100% accurate — thumbnail se better) ──
-        // Agar URL se video ID available hai toh seedha ID match karo
-        if (expectedVideoId) {
-          const idMatch = await page.evaluate((idx, vid) => {
-            const videos = document.querySelectorAll('ytd-video-renderer');
-            const el = videos[idx];
-            if (!el) return false;
-            const link = el.querySelector('a#video-title');
-            const href = link?.getAttribute('href') || '';
-            return href.includes(vid);
-          }, result.index, expectedVideoId).catch(() => false);
-
-          if (idMatch) {
-            // 100% correct video — click it directly
-            const clicked = await page.evaluate((vid) => {
-              const videos = document.querySelectorAll('ytd-video-renderer a#video-title');
-              for (const a of videos) {
-                if ((a.getAttribute('href') || '').includes(vid)) { a.click(); return true; }
-              }
-              return false;
-            }, expectedVideoId).catch(() => false);
-
-            if (clicked) {
-              if (typeof log === 'function') log('success', `[YT] Video ID verified and clicked: ${expectedVideoId}`);
-              await sleep(randomDelay(2000, 4000));
-              return true;
-            }
-          }
-          // ID not matched for this result — skip to title-based check
-        }
-
-        // ── TITLE + CHANNEL MATCH (fallback when no video ID) ──
-        // BUG FIX: Ab verifyVideoMatch() use karo — WORD-LEVEL matching (50%+ words match = click)
-        // Pehle raw string.includes() tha — fail hota tha agar keyword partial tha ya different order mein
-        // Example fail: keyword="secret huge deposits", title="Secret to Huge Deposits in Idle Bank Tycoon..."
-        //   → "includes" fail (exact substring nahi) but WORDS sab match hote → verifyVideoMatch catches it
         const verification = verifyVideoMatch(
           result.title,
-          result.channel,
-          0,                        // duration unknown at search stage
+          cleanChannelLabel(result.channel),
+          0,
           videoTitle,
-          channelName || '',
+          cleanChannelLabel(channelName),
           0
         );
 
@@ -681,7 +865,14 @@ async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuratio
             log('info', `[YT] Match found: "${result.title}" / "${result.channel}" (score: ${verification.score}) — clicking index ${result.index}...`);
           }
 
-          // Click ONLY the verified row — never re-scan all results (that caused wrong-video clicks)
+          if (expectedVideoId) {
+            const navigated = await openVideoFromSearchResult(page, expectedVideoId, log);
+            if (navigated) {
+              await sleep(randomDelay(clickWaitMin, clickWaitMax));
+              return true;
+            }
+          }
+
           const clickedInEval = await page.evaluate((idx) => {
             const videos = document.querySelectorAll('ytd-video-renderer');
             const el = videos[idx];
@@ -693,8 +884,15 @@ async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuratio
           }, result.index).catch(() => false);
 
           if (clickedInEval) {
+            const navigated = expectedVideoId
+              ? await waitForWatchPage(page, expectedVideoId, 18000)
+              : true;
+            if (!navigated) {
+              if (typeof log === 'function') log('warn', `[YT] Title match click did not load watch page — next result`);
+              continue;
+            }
             if (typeof log === 'function') log('success', `[YT] Clicked verified result at index ${result.index}`);
-            await sleep(randomDelay(2000, 4000));
+            await sleep(randomDelay(clickWaitMin, clickWaitMax));
             return true;
           }
 
@@ -716,10 +914,10 @@ async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuratio
         }
       }
       
-      // Not found in current results — scroll down to load more
-      if (scrollAttempt < 2) {
-        await page.mouse.wheel(0, 400);
-        await sleep(randomDelay(1500, 2500));
+      // Not found in current viewport — scroll once more, then next keyword
+      if (scrollAttempt < maxScrolls - 1) {
+        await page.mouse.wheel(0, randomDelay(350, 650));
+        await sleep(randomDelay(scrollWaitMin, scrollWaitMax));
       }
     }
     
@@ -843,75 +1041,75 @@ async function searchYahoo(page, videoTitle, channelName, expectedDuration, huma
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function openVideoSmart(page, videoTitle, channelName, videoUrl, expectedDuration, profileIndex, humanTypeFn, log, trafficMix, trafficPreference, options = {}) {
   const strictSource = !!options.strictTraffic;
-  const source = assignTrafficSource(profileIndex, 30, !!videoUrl, trafficMix, trafficPreference);
+  const sessionState = options.sessionState || null;
+  const source = options.assignedSource
+    || assignTrafficSource(profileIndex, 30, !!videoUrl, trafficMix, trafficPreference);
   const intendedSource = source;
-  log('info', `[Traffic] Assigned source: ${source} (preference: ${trafficPreference || 'custom'})`);
 
-  // Extract video ID from URL for 100% accurate verification in search results
+  log('info', `[Traffic] Locked source: ${source} (preference: ${trafficPreference || 'custom'})`);
+
   const expectedVideoId = extractVideoId(videoUrl);
   if (expectedVideoId) log('info', `[VideoID] Will verify with ID: ${expectedVideoId}`);
 
-  let result;
+  const ctx = {
+    videoTitle, channelName, videoUrl, expectedDuration, profileIndex, humanTypeFn, log, expectedVideoId,
+    searchQuerySeed: options.searchQuerySeed || null,
+  };
 
-  switch (source) {
-    case 'direct':
-      if (videoUrl) {
-        await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await sleep(randomDelay(2000, 4000));
-        log('success', '[Direct] Video opened via URL');
-        return { success: true, source: 'direct', intendedSource };
-      }
-      result = await searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId);
-      break;
+  let result = await runPrimaryTrafficSource(page, source, ctx);
 
-    case 'youtube-search':
-      result = await searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId);
-      break;
-      
-    case 'google':
-      result = await searchGoogle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
-      break;
-      
-    case 'bing':
-      result = await searchBing(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
-      break;
-      
-    case 'channel-page':
-      result = await searchChannelPage(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
-      break;
-      
-    case 'duckduckgo':
-      result = await searchDuckDuckGo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
-      break;
-      
-    case 'yahoo':
-      result = await searchYahoo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
-      break;
-      
-    default:
-      result = await searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log);
+  // Exact full-title YouTube retry (helps when escalation queries miss)
+  if (!strictSource && (!result || !result.success) && isYouTubeSearchFamily(source)) {
+    log('info', '[Traffic] Primary YouTube searches failed — trying EXACT FULL TITLE...');
+    try {
+      result = await searchYouTubeFullTitle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId);
+    } catch (err) {
+      log('warn', `[Traffic] Full title search error: ${err.message}`);
+    }
   }
-  
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // FALLBACK CHAIN — Sab sources try karo before direct URL
-  // Order: YouTube Search (5 levels) → Google → Bing → DuckDuckGo → Yahoo → Channel Page
-  // LAST RESORT: Direct URL — sirf tab jab sab 6 sources fail ho jaayein
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  // Legacy fallback: try every search surface before giving up (strict skips whole chain + last direct).
+  // Order matches server 2 old: YouTube Search → Google → Bing → DuckDuckGo → Yahoo → Channel Page
   if (strictSource && (!result || !result.success)) {
     log('warn', `[QA] Strict traffic: "${source}" failed — skipping fallback chain`);
   }
 
   if (!strictSource && (!result || !result.success)) {
+    const ytFbOpts = {
+      maxAttempts: 6,
+      ...(options.searchQuerySeed ? { searchQuerySeed: options.searchQuerySeed } : {}),
+    };
     const fallbackOrder = [
-      { id: 'youtube-search', fn: () => searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId) },
-      { id: 'google',         fn: () => searchGoogle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log) },
-      { id: 'bing',           fn: () => searchBing(page, videoTitle, channelName, expectedDuration, humanTypeFn, log) },
-      { id: 'duckduckgo',     fn: () => searchDuckDuckGo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log) },
-      { id: 'yahoo',          fn: () => searchYahoo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log) },
-      { id: 'channel-page',   fn: () => searchChannelPage(page, videoTitle, channelName, expectedDuration, humanTypeFn, log) },
-    ].filter(f => f.id !== source); // Primary already tried — skip karo
+      {
+        id: 'youtube-search',
+        fn: () => searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, ytFbOpts),
+      },
+      {
+        id: 'google',
+        fn: () => searchGoogle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
+      },
+      {
+        id: 'bing',
+        fn: () => searchBing(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
+      },
+      {
+        id: 'duckduckgo',
+        fn: () => searchDuckDuckGo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
+      },
+      {
+        id: 'yahoo',
+        fn: () => searchYahoo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
+      },
+      {
+        id: 'channel-page',
+        fn: () => searchChannelPage(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
+      },
+    ].filter((f) => f.id !== source);
 
-    log('info', `[Fallback] "${source}" failed — trying ${fallbackOrder.length} more sources before direct URL...`);
+    log(
+      'info',
+      `[Fallback] "${source}" failed — trying ${fallbackOrder.length} more sources before last-resort direct URL...`,
+    );
 
     for (const fallback of fallbackOrder) {
       log('info', `[Fallback] Trying: ${fallback.id}`);
@@ -928,47 +1126,86 @@ async function openVideoSmart(page, videoTitle, channelName, videoUrl, expectedD
     }
   }
 
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  // ABSOLUTE LAST RESORT: Direct URL
-  // Sirf tab jab SARE 6 search methods fail ho jaayein
-  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // Last resort: known watch URL only when strictTraffic is false (matches legacy behaviour)
   if (!strictSource && (!result || !result.success)) {
     if (videoUrl) {
-      log('warn', '[Fallback] ⚠️ All search sources failed — direct URL as LAST RESORT');
+      log('warn', '[Fallback] All search sources failed — direct URL as LAST RESORT');
       await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await sleep(randomDelay(2000, 4000));
       result = { success: true, source: 'direct-fallback', intendedSource, usedFallback: true };
+      if (sessionState && typeof sessionState === 'object') {
+        sessionState.directUrlUses = (sessionState.directUrlUses ?? 0) + 1;
+      }
     } else {
       log('error', '[Fallback] All sources failed and no URL available');
     }
   }
 
+  if (!result || !result.success) {
+    log('warn', `[Traffic] "${source}" failed after fallbacks — skipping video`);
+    result = {
+      ...((result && typeof result === 'object') ? result : {}),
+      success: false,
+      source: result?.source || source || 'none',
+      intendedSource,
+      skipped: true,
+    };
+  }
+
   // Post-open verification — wrong video par watch mat karo
   if (result && result.success) {
-    result = { ...result, intendedSource: result.intendedSource || intendedSource, usedFallback: result.usedFallback || (result.source !== intendedSource) };
+    result = {
+      ...result,
+      intendedSource: result.intendedSource || intendedSource,
+      usedFallback: result.usedFallback || (result.source !== intendedSource && result.source !== 'direct'),
+    };
     try {
+      if (expectedVideoId) {
+        await waitForWatchPage(page, expectedVideoId, 12000);
+      } else {
+        await sleep(randomDelay(1500, 3000));
+      }
       const { verifyOpenedVideo, detectPageBlock } = require('./agentBrain.cjs');
       const block = await detectPageBlock(page);
       if (block.blocked) {
         log('warn', `[Verify] Page blocked (${block.kind}): ${block.message}`);
-        return { success: false, source: result.source, blocked: true, blockKind: block.kind };
+        return { success: false, source: result.source, blocked: true, blockKind: block.kind, intendedSource };
       }
       const check = await verifyOpenedVideo(page, {
         title: videoTitle,
         channelName,
         videoUrl,
+        videoId: expectedVideoId,
       });
-      if (!check.ok) {
-        log('warn', `[Verify] Opened wrong video (${check.reason}): playing "${check.actual?.title}" by "${check.actual?.channel}"`);
-        return { success: false, source: result.source, verifyFailed: true, verifyReason: check.reason };
+      let finalCheck = check;
+      if (!finalCheck.ok) {
+        log('warn', `[Verify] Opened wrong video (${finalCheck.reason}): playing "${finalCheck.actual?.title}" by "${finalCheck.actual?.channel}"`);
+        if (expectedVideoId && videoUrl) {
+          log('warn', '[Verify] Recovering via watch URL from search result...');
+          try {
+            await page.goto(videoUrl, { waitUntil: 'commit', timeout: 30000 });
+            await waitForWatchPage(page, expectedVideoId, 15000);
+            finalCheck = await verifyOpenedVideo(page, {
+              title: videoTitle,
+              channelName,
+              videoUrl,
+              videoId: expectedVideoId,
+            });
+          } catch (err) {
+            log('warn', `[Verify] URL recovery failed: ${err.message}`);
+          }
+        }
       }
-      log('success', `[Verify] Confirmed: "${check.actual.title}"`);
+      if (!finalCheck.ok) {
+        return { success: false, source: result.source, verifyFailed: true, verifyReason: finalCheck.reason, intendedSource };
+      }
+      log('success', `[Verify] Confirmed: "${finalCheck.actual.title}"`);
     } catch (err) {
       log('warn', `[Verify] Check skipped: ${err.message}`);
     }
   }
 
-  return result || { success: false, source: 'none' };
+  return result || { success: false, source: 'none', intendedSource };
 }
 
 function extractVideoIdFromUrl(url) {
@@ -1046,6 +1283,7 @@ module.exports = {
   openVideoViaBacklink,
   extractVideoIdFromUrl,
   generateEscalationQueries,
+  buildYouTubeSearchPlan,
   verifyVideoMatch,
   assignTrafficSource,
   parseDurationText,

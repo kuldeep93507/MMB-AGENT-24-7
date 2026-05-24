@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Trash2, ExternalLink, Play, Globe, Link, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, ExternalLink, Play, Globe, Link, AlertCircle, Zap } from 'lucide-react';
 import type { Profile } from '../types';
 
 interface Backlink {
@@ -25,8 +25,26 @@ const SOURCE_TYPES = [
   { value: 'other',     label: 'Other',         icon: '🔗' },
 ];
 
+// Default referral backlinks — pre-seeded (pages that already link to the site)
+const DEFAULT_BACKLINKS: Backlink[] = [
+  {
+    id: 'default_scamadviser',
+    sourceUrl: 'https://www.scamadviser.com/check-website/hamstercombocard.com',
+    sourceType: 'other',
+    targetArticleUrl: 'https://hamstercombocard.com',
+    usedCount: 0,
+    lastUsed: null,
+  },
+];
+
 function loadBacklinks(): Backlink[] {
-  try { const d = localStorage.getItem('mmb_sites_backlinks'); return d ? JSON.parse(d) : []; } catch { return []; }
+  try {
+    const d = localStorage.getItem('mmb_sites_backlinks');
+    if (d) return JSON.parse(d);
+    // First time — seed defaults
+    saveBacklinks(DEFAULT_BACKLINKS);
+    return DEFAULT_BACKLINKS;
+  } catch { return DEFAULT_BACKLINKS; }
 }
 function saveBacklinks(links: Backlink[]) {
   try { localStorage.setItem('mmb_sites_backlinks', JSON.stringify(links)); } catch {}
@@ -40,6 +58,9 @@ export default function BacklinksPage({ profiles }: BacklinksPageProps) {
   const [assignMode, setAssignMode]       = useState<'random' | 'manual'>('random');
   const [manualAssign, setManualAssign]   = useState<Record<string, string[]>>({});
   const [toast, setToast]                 = useState<{ msg: string; ok: boolean } | null>(null);
+  const [buildRunning, setBuildRunning]   = useState(false);
+  const [buildTarget, setBuildTarget]     = useState('https://hamstercombocard.com');
+  const [showBuilder, setShowBuilder]     = useState(false);
 
   useEffect(() => { saveBacklinks(backlinks); }, [backlinks]);
 
@@ -65,6 +86,28 @@ export default function BacklinksPage({ profiles }: BacklinksPageProps) {
       const updated = current.includes(backlinkId) ? current.filter(x => x !== backlinkId) : [...current, backlinkId];
       return { ...prev, [profileId]: updated };
     });
+  };
+
+  const handleBuild = async () => {
+    if (!selectedProfiles.length || !buildTarget) return;
+    setBuildRunning(true);
+    try {
+      const res = await fetch('/backend-api/api/backlink/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          profileIds: selectedProfiles,
+          targetSiteUrl: buildTarget,
+          maxBlogsPerProfile: 5,
+          submitEnabled: true,
+        }),
+      });
+      if (!res.ok) throw new Error(`Server error ${res.status}`);
+      showToast(`🔗 Backlink builder started! ${selectedProfiles.length} profiles × 5 blogs = up to ${selectedProfiles.length * 5} backlinks`);
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Build failed', false);
+    }
+    setBuildRunning(false);
   };
 
   const handleRun = async () => {
@@ -145,14 +188,18 @@ export default function BacklinksPage({ profiles }: BacklinksPageProps) {
             <h1 className="text-2xl font-bold text-white">Backlink Traffic</h1>
             <p className="text-gray-500 text-sm mt-0.5">External referral traffic — LinkedIn, Quora, Blogs → Your Site</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <button onClick={() => setShowAdd(true)}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold transition-all">
               <Plus size={15} /> Add Backlink
             </button>
+            <button onClick={() => setShowBuilder(s => !s)}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all ${showBuilder ? 'bg-orange-600 hover:bg-orange-500' : 'bg-orange-700 hover:bg-orange-600'} text-white`}>
+              <Zap size={15} /> Auto Builder
+            </button>
             <button onClick={handleRun} disabled={backlinks.length === 0 || selectedProfiles.length === 0 || running}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-green-600 hover:bg-green-500 disabled:opacity-40 text-white text-sm font-bold transition-all">
-              <Play size={15} /> {running ? 'Running...' : `Run (${selectedProfiles.length} profiles)`}
+              <Play size={15} /> {running ? 'Running...' : `Referral Run (${selectedProfiles.length})`}
             </button>
           </div>
         </div>
@@ -179,6 +226,47 @@ export default function BacklinksPage({ profiles }: BacklinksPageProps) {
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
+
+        {/* Auto Builder Panel */}
+        {showBuilder && (
+          <div className="bg-orange-950/30 border border-orange-700/40 rounded-2xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <Zap size={16} className="text-orange-400" />
+              <h3 className="text-orange-300 font-bold text-sm">Auto Backlink Builder — WordPress Comment Backlinks</h3>
+            </div>
+            <p className="text-xs text-gray-400 mb-4">
+              Agent automatically searches Google for WordPress blogs in your niche → fills comment form with your site URL → submits.
+              Each profile does <strong className="text-white">5 blogs</strong> = {selectedProfiles.length * 5} potential backlinks.
+            </p>
+            <div className="mb-4">
+              <label className="text-xs text-gray-400 block mb-1">Your site URL (this becomes the backlink)</label>
+              <input
+                type="text"
+                value={buildTarget}
+                onChange={e => setBuildTarget(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 text-white rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-orange-500"
+              />
+            </div>
+            <div className="bg-gray-800/60 rounded-xl p-3 mb-4 space-y-1 text-xs text-gray-400">
+              <p>1. Google pe search: <span className="text-green-400">"mesothelioma lawyer blog wordpress"</span></p>
+              <p>2. WordPress blogs dhundega (comment form wale)</p>
+              <p>3. Comment fill karega: Name + Email + <span className="text-orange-400">Website={buildTarget}</span> + AI comment</p>
+              <p>4. Submit → Real backlink bani!</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleBuild}
+                disabled={!selectedProfiles.length || buildRunning}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-orange-600 hover:bg-orange-500 disabled:opacity-40 text-white text-sm font-bold transition-all"
+              >
+                <Zap size={15} />
+                {buildRunning ? 'Building backlinks...' : `Build ${selectedProfiles.length * 5} Backlinks (${selectedProfiles.length} profiles)`}
+              </button>
+              {!selectedProfiles.length && <p className="text-xs text-yellow-400">Pehle profiles select karo niche se</p>}
+            </div>
+          </div>
+        )}
+
         {/* Profile Selection */}
         {profiles.length === 0 ? (
           <div className="flex items-center gap-3 bg-yellow-900/20 border border-yellow-700/40 rounded-xl p-4">

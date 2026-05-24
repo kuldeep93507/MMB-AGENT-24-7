@@ -8,7 +8,6 @@ import PlaylistModal from './PlaylistModal';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import VideoListPanel from './VideoListPanel';
 import { isPermanentChannel } from '../data/defaultChannels';
-
 interface ChannelsPageProps {
   channels: Channel[];
   getChannels: () => (Channel & { total_videos: number; enabled_videos: number; new_videos: number })[];
@@ -30,6 +29,7 @@ interface ChannelsPageProps {
   togglePlaylist: (id: number) => void;
   toasts: { id: string; message: string; type: 'success' | 'error' | 'info' }[];
   dismissToast: (id: string) => void;
+  forceSyncToServer?: () => Promise<boolean>;
 }
 
 export default function ChannelsPage({
@@ -53,6 +53,7 @@ export default function ChannelsPage({
   togglePlaylist,
   toasts,
   dismissToast,
+  forceSyncToServer,
 }: ChannelsPageProps) {
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
@@ -87,7 +88,7 @@ export default function ChannelsPage({
   const playlistChannel = playlistChannelId ? channels.find(c => c.id === playlistChannelId) || null : null;
 
   return (
-    <div className="flex flex-col h-full relative">
+    <div className="flex flex-col h-full relative overflow-y-auto">
       {/* ━━━ TOP BAR ━━━ */}
       <div className="px-6 py-4 border-b border-gray-800 bg-gray-950/50 flex-shrink-0">
         {/* Page Header */}
@@ -104,8 +105,19 @@ export default function ChannelsPage({
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600/20 border border-blue-600/30 text-blue-400 hover:bg-blue-600/30 transition-all text-sm font-medium"
             >
               <RefreshCw size={15} />
-              Sync All
+              Sync All Channels
             </button>
+            {forceSyncToServer && (
+              <button
+                type="button"
+                onClick={() => void forceSyncToServer()}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-green-600/20 border border-green-600/30 text-green-400 hover:bg-green-600/30 transition-all text-sm font-medium"
+                title="Push enabled videos to backend (Scheduler / Shuffle use this list)"
+              >
+                <RefreshCw size={15} />
+                Sync to Server
+              </button>
+            )}
             <button
               onClick={() => setShowAddModal(true)}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white transition-all text-sm font-semibold shadow-lg shadow-red-900/30"

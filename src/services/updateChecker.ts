@@ -5,7 +5,7 @@
  * - One-click update via backend
  */
 
-import { backendUrl } from './backendOrigin';
+import { backendUrl, getAuthHeaders } from './backendOrigin';
 
 const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/kuldeep93507/MMB-AGENT-24-7/main/version.json';
 const LOCAL_VERSION_KEY = 'mmb_current_version';
@@ -69,7 +69,10 @@ export async function checkForUpdates(): Promise<UpdateStatus> {
  */
 export async function runUpdate(): Promise<{ success: boolean; message: string }> {
   try {
-    const res = await fetch(backendUrl('/api/update/run'), { method: 'POST' });
+    const res = await fetch(backendUrl('/api/update/run'), {
+      method: 'POST',
+      headers: { ...getAuthHeaders() },
+    });
     const data = await res.json();
     if (data.success) {
       // Update local version

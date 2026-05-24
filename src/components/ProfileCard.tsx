@@ -1,6 +1,7 @@
 import { Play, Square, Settings, Trash2, RefreshCw, Globe, Clock, Cookie } from 'lucide-react';
 import { useState } from 'react';
 import type { Profile } from '../types';
+import { proxyProviderLabel, isMultiloginProxyHost } from '../utils/profileAdapter';
 import { backendUrl } from '../services/backendOrigin';
 
 const COOKIE_SITES = [
@@ -93,6 +94,11 @@ export default function ProfileCard({ profile, isRecreating = false, onStart, on
 
   const sessionLabel = profile.proxy.sessionId?.trim() || '—';
   const lifeLabel = profile.proxy.life === 'unknown' ? '—' : profile.proxy.life;
+  const proxyHostLabel = profile.proxy.server
+    ? `${profile.proxy.server}${profile.proxy.port ? ':' + profile.proxy.port : ''}`
+    : '—';
+  const proxyKind = proxyProviderLabel(profile.proxy.server);
+  const isMlxProxy = isMultiloginProxyHost(profile.proxy.server);
 
   const canStart = !isRecreating && (profile.status === 'stopped' || profile.status === 'error');
   const canStop = !isRecreating && (profile.status === 'running' || profile.status === 'starting');
@@ -143,12 +149,6 @@ export default function ProfileCard({ profile, isRecreating = false, onStart, on
         </div>
         </div>
 
-        {profile.proxyFingerprintPlaceholder && (
-          <div className="px-4 py-2 bg-amber-900/15 border-b border-amber-800/30 text-[11px] text-amber-200/90 leading-snug">
-            Not enough provider data yet for full proxy/fingerprint on this card — create via <b>MMB create-full</b> or rely on enriched provider APIs. CDP debug line is real when running.
-          </div>
-        )}
-
       {/* Body */}
       <div className="px-4 py-3 space-y-2">
         {/* IP + Location */}
@@ -170,11 +170,19 @@ export default function ProfileCard({ profile, isRecreating = false, onStart, on
           </div>
         </div>
 
-        {/* Proxy Session */}
-        <div className="bg-gray-800/60 rounded-lg px-3 py-1.5">
-          <div className="text-gray-600 text-xs truncate font-mono">
-            session: <span className="text-gray-400">{sessionLabel}</span> • life: <span className="text-gray-400">{lifeLabel}</span>
+        {/* Proxy info */}
+        <div className="bg-gray-800/60 rounded-lg px-3 py-1.5 space-y-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className={`text-[10px] font-semibold uppercase tracking-wide ${isMlxProxy ? 'text-purple-400' : 'text-green-400'}`}>
+              {proxyKind}
+            </span>
+            <span className="text-[10px] text-gray-500 font-mono truncate">{proxyHostLabel}</span>
           </div>
+          {!isMlxProxy && (
+            <div className="text-gray-600 text-xs truncate font-mono">
+              session: <span className="text-gray-400">{sessionLabel}</span> • life: <span className="text-gray-400">{lifeLabel}</span>
+            </div>
+          )}
         </div>
 
         {/* Current Action */}

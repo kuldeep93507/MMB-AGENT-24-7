@@ -1,24 +1,33 @@
 {
-  "moreloginApiKey": "0df5ef07ccfd376ba7461deab39c040f6f80db8fc5829bfd",
+  "_comment": "Copy to settings.json and fill in locally — never commit settings.json",
+
+  "moreloginApiKey": "",
   "moreloginPort": "40000",
   "moreloginSecurityEnabled": true,
-  "multiloginEmail": "fiewin375@gmail.com",
-  "multiloginPassword": "Kuldeep@1211",
+
+  "multiloginEmail": "",
+  "multiloginPassword": "",
   "multiloginToken": "",
-  "multiloginFolderId": "fb5dbb2c-c1dc-45ee-9fa1-f34819d84bf2",
+  "multiloginFolderId": "",
+
   "adspowerApiKey": "",
   "adspowerPort": "50325",
+
   "proxyServer": "us.smartproxy.net",
   "proxyPort": "3120",
-  "proxyPassword": "xEdCpOSFn3nd4ixu",
-  "proxyPrefix": "smart-pwgbkxcy3lyi",
+  "proxyPassword": "",
+  "proxyPrefix": "",
   "defaultProxyLife": "4hr",
+
   "startDelay": "5000",
   "actionDelay": "2000",
   "maxConcurrent": "5",
   "maxRetries": "3",
   "backendPort": "3200",
+
   "cronEnabled": false,
   "cronSchedule": "0 9 * * *",
-  "cronAction": "start_all"
+  "cronAction": "start_all",
+
+  "anthropicApiKey": ""
 }

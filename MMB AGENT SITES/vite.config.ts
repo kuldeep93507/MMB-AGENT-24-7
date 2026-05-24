@@ -11,7 +11,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const MORELOGIN_BASE = 'http://127.0.0.1:40000';
-const MORELOGIN_API_KEY = process.env.MORELOGIN_API_KEY || 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e';
+const MORELOGIN_API_KEY = process.env.MORELOGIN_API_KEY || '';
 
 function moreloginRequest(apiPath: string, method: string, body?: string): Promise<{ status: number; data: string }> {
   return new Promise((resolve, reject) => {
@@ -23,7 +23,7 @@ function moreloginRequest(apiPath: string, method: string, body?: string): Promi
       method,
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': MORELOGIN_API_KEY,
+        ...(MORELOGIN_API_KEY ? { Authorization: `Bearer ${MORELOGIN_API_KEY}` } : {}),
       },
       timeout: 60000,
     };

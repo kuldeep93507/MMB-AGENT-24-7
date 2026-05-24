@@ -32,12 +32,42 @@ class Orchestrator {
   constructor() {
     this.workers = new Map(); // profileId → { worker, status, retries, logs }
     this.maxRetries = 3;
+    this._arrangeTimer = null;
+  }
+
+  /** Resolve worker state after profile_rebinding (map key may have moved). */
+  _workerStateByThread(worker) {
+    for (const st of this.workers.values()) {
+      if (st.worker === worker) return st;
+    }
+    return null;
+  }
+
+  _scheduleArrangeAll() {
+    if (this._arrangeTimer) clearTimeout(this._arrangeTimer);
+    this._arrangeTimer = setTimeout(async () => {
+      try {
+        const { arrangeProfilesGrid, resolveRunningFromCache, loadAutoArrangeSetting } = require('./services/windowArranger.cjs');
+        if (!loadAutoArrangeSetting()) return;
+        const runningIds = [...this.workers.entries()]
+          .filter(([, s]) => ['running', 'watching', 'connecting', 'starting', 'waiting'].includes(s.status))
+          .map(([id, s]) => s.currentProfileId || id);
+        const entries = resolveRunningFromCache(runningIds);
+        if (entries.length >= 1) {
+          const results = await arrangeProfilesGrid(entries);
+          const ok = results.filter((r) => r.status === 'ok').length;
+          console.log(`[Orchestrator] Auto-arranged ${ok}/${results.length} browser windows`);
+        }
+      } catch (err) {
+        console.warn('[Orchestrator] Auto-arrange failed:', err.message);
+      }
+    }, 3000);
   }
 
   /**
    * Start a worker for a profile
    */
-  startWorker(profileId, profileName, videos, config = {}, startDelay = 0) {
+  startWorker(profileId, profileName, videos, config = {}, startDelay = 0, existingRetries = 0) {
     // Kill existing worker for this profile if any
     if (this.workers.has(profileId)) {
       this.stopWorker(profileId);
@@ -49,9 +79,11 @@ class Orchestrator {
       worker: null,
       status: 'starting',
       profileName,
+      /** Updated if worker reports profile_rebinding after recovery recreate */
+      currentProfileId: profileId,
       currentVideo: null,
       progress: '0/0',
-      retries: 0,
+      retries: Math.max(0, Number(existingRetries) || 0),
       logs: [],
       startedAt: Date.now(),
       results: null,
@@ -63,10 +95,35 @@ class Orchestrator {
     const worker = new Worker(WORKER_PATH);
 
     worker.on('message', (msg) => {
-      const state = this.workers.get(profileId);
+      const msgProfileKey = typeof msg.profileId === 'string' && msg.profileId
+        ? msg.profileId
+        : profileId;
+      const stateLookupKey = msg.type === 'profile_rebinding'
+        ? (msg.oldProfileId || profileId)
+        : msgProfileKey;
+      let state = this.workers.get(stateLookupKey);
+      if (!state && msgProfileKey !== stateLookupKey) {
+        state = this.workers.get(msgProfileKey);
+      }
+      if (!state && stateLookupKey !== profileId) {
+        state = this.workers.get(profileId);
+      }
       if (!state) return;
 
+      const emitProfileId = (typeof msg.profileId === 'string' && msg.profileId)
+        ? msg.profileId
+        : (state.currentProfileId || profileId);
       switch (msg.type) {
+        case 'profile_rebinding': {
+          const oldPid = msg.oldProfileId || profileId;
+          const newPid = msg.profileId;
+          if (!newPid || oldPid === newPid) break;
+          this.workers.delete(oldPid);
+          state.currentProfileId = newPid;
+          this.workers.set(newPid, state);
+          console.log(`[Orchestrator] Profile rebind ${oldPid.slice(-4)} → ${newPid.slice(-4)}`);
+          break;
+        }
         case 'status':
           state.status = msg.status;
           if (msg.currentVideo) state.currentVideo = msg.currentVideo;
@@ -87,7 +144,7 @@ class Orchestrator {
             this.onActivityLog({
               level: msg.level,
               message: msg.message,
-              profileId,
+              profileId: emitProfileId,
               profileName: state.profileName,
               source: 'worker',
               timestamp: msg.time ? parseLogTime(msg.time) : Date.now(),
@@ -99,11 +156,26 @@ class Orchestrator {
             this.onBacklinkUsed([msg.backlinkId]);
           }
           break;
+        case 'window_connected':
+          this._scheduleArrangeAll();
+          break;
         case 'done':
           state.status = 'done';
           state.results = msg.results;
-          // Notify main thread so it can clean up runningSchedules (prevent memory leak)
-          if (this.onWorkerDone) this.onWorkerDone(profileId);
+          if (!state.finishNotified) {
+            state.finishNotified = true;
+            if (this.onWorkerDone) this.onWorkerDone(emitProfileId);
+            const watched = msg.results?.watched ?? 0;
+            const failed = msg.results?.failed ?? 0;
+            if (this.onWorkerFinished) {
+              this.onWorkerFinished(emitProfileId, {
+                success: watched > 0,
+                status: watched > 0 ? 'done' : 'no_watch',
+                watched,
+                failed,
+              });
+            }
+          }
           break;
         case 'video_done':
           if (typeof msg.videoIndex === 'number' && state.remainingVideos) {
@@ -119,7 +191,7 @@ class Orchestrator {
             this.onActivityLog({
               level: 'error',
               message: String(msg.error || 'Worker error'),
-              profileId,
+              profileId: emitProfileId,
               profileName: state.profileName,
               source: 'worker',
             });
@@ -134,28 +206,32 @@ class Orchestrator {
               ? state.remainingVideos
               : videos; // Fallback to full list only if remainingVideos is empty/undefined
             state.remainingVideos = remainingVideos; // Keep in sync for next potential crash
-            console.log(`[Orchestrator] Worker ${profileId.slice(-4)} crashed — restarting with ${remainingVideos.length} remaining videos (${state.retries}/${this.maxRetries})`);
+            const curId = state.currentProfileId || profileId;
+            console.log(`[Orchestrator] Worker ${curId.slice(-4)} crashed — restarting with ${remainingVideos.length} remaining videos (${state.retries}/${this.maxRetries})`);
             setTimeout(() => {
-              this.startWorker(profileId, profileName, remainingVideos, config, 3000);
+              this.startWorker(curId, profileName, remainingVideos, config, 3000, state.retries);
             }, 5000);
           } else {
-            console.log(`[Orchestrator] Worker ${profileId.slice(-4)} — max retries reached, giving up`);
+            console.log(`[Orchestrator] Worker ${(state.currentProfileId || profileId).slice(-4)} — max retries reached, giving up`);
+            state.status = 'crashed';
+            if (this.onWorkerFinished) this.onWorkerFinished(emitProfileId, { success: false, status: 'crashed' });
           }
           break;
       }
     });
 
     worker.on('error', (err) => {
-      console.error(`[Orchestrator] Worker ${profileId.slice(-4)} error:`, err.message);
-      const state = this.workers.get(profileId);
+      const state = this._workerStateByThread(worker);
       if (!state) return;
+      const curId = state.currentProfileId || profileId;
+      console.error(`[Orchestrator] Worker ${curId.slice(-4)} error:`, err.message);
       state.status = 'error';
       state.logs.push({ time: new Date().toISOString(), level: 'error', message: `Worker crashed: ${err.message}` });
       if (this.onActivityLog) {
         this.onActivityLog({
           level: 'error',
           message: `Worker crashed: ${err.message}`,
-          profileId,
+          profileId: curId,
           profileName: state.profileName,
           source: 'worker',
         });
@@ -166,22 +242,24 @@ class Orchestrator {
           ? state.remainingVideos
           : videos;
         state.remainingVideos = remainingVideos;
-        console.log(`[Orchestrator] Worker ${profileId.slice(-4)} thread error — restarting with ${remainingVideos.length} remaining videos (${state.retries}/${this.maxRetries})`);
+        console.log(`[Orchestrator] Worker ${curId.slice(-4)} thread error — restarting with ${remainingVideos.length} remaining videos (${state.retries}/${this.maxRetries})`);
         setTimeout(() => {
-          this.startWorker(profileId, profileName, remainingVideos, config, 3000);
+          this.startWorker(curId, profileName, remainingVideos, config, 3000, state.retries);
         }, 5000);
       } else {
         state.status = 'crashed';
-        console.log(`[Orchestrator] Worker ${profileId.slice(-4)} — max retries reached after thread crash`);
+        console.log(`[Orchestrator] Worker ${curId.slice(-4)} — max retries reached after thread crash`);
+        if (this.onWorkerFinished) this.onWorkerFinished(curId, { success: false, status: 'crashed' });
       }
     });
 
     worker.on('exit', (code) => {
-      const state = this.workers.get(profileId);
+      const state = this._workerStateByThread(worker);
+      const curId = state?.currentProfileId || profileId;
       if (state && state.status !== 'done') {
         state.status = code === 0 ? 'done' : 'crashed';
       }
-      console.log(`[Orchestrator] Worker ${profileId.slice(-4)} exited with code ${code}`);
+      console.log(`[Orchestrator] Worker ${curId.slice(-4)} exited with code ${code}`);
     });
 
     workerState.worker = worker;
@@ -205,18 +283,30 @@ class Orchestrator {
    * Stop a specific worker
    */
   stopWorker(profileId) {
-    const state = this.workers.get(profileId);
+    let state = this.workers.get(profileId);
+    let mapKey = profileId;
+    if (!state) {
+      for (const [id, st] of this.workers.entries()) {
+        if (st.currentProfileId === profileId) {
+          state = st;
+          mapKey = id;
+          break;
+        }
+      }
+    }
     if (!state || !state.worker) return false;
 
+    const livePid = state.currentProfileId || profileId;
+
     try {
-      state.worker.postMessage({ type: 'stop', profileId, browserType: state.browserType });
+      state.worker.postMessage({ type: 'stop', profileId: livePid, browserType: state.browserType });
       setTimeout(() => {
         try { state.worker.terminate(); } catch {}
       }, 3000);
     } catch {}
 
     state.status = 'stopped';
-    console.log(`[Orchestrator] Worker ${profileId.slice(-4)} stopped`);
+    console.log(`[Orchestrator] Worker ${livePid.slice(-4)} stopped`);
     return true;
   }
 

@@ -57,6 +57,8 @@ export interface Profile {
    * Optional for backward compat with legacy local-only profiles.
    */
   browserType?: 'morelogin' | 'adspower' | 'multilogin';
+  folderId?: string;
+  folderName?: string;
 }
 
 export interface Article {

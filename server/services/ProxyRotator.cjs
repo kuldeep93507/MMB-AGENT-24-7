@@ -188,9 +188,10 @@ class ProxyRotator {
       // Generate unique session ID (uppercase alphanumeric, 6 chars)
       const sessionId = this._generateUniqueSessionId();
 
-      // SmartProxy correct username format per spec:
-      // PREFIX_area-US_state-STATE_city-CITY_life-MINUTES_session-SESSIONID
-      const username = `${prefix}_area-US_state-${state}_city-${city}_life-${selectedLife}_session-${sessionId}`;
+      // SmartProxy correct username format (confirmed working):
+      // PREFIX_area-US_life-MINUTES_session-SESSIONID
+      // NOTE: state/city targeting removed — Multilogin launcher validation rejects those formats
+      const username = `${prefix}_area-US_life-${selectedLife}_session-${sessionId}`;
 
       const now = Date.now();
 

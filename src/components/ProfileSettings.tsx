@@ -498,7 +498,10 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
               {/* Engagement */}
               <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
                 <h3 className="text-white font-semibold text-sm mb-3 flex items-center gap-2"><Heart size={14} className="text-red-400" /> Engagement</h3>
-                <p className="text-xs text-gray-500 mb-3">Like, Subscribe, Comment — daily caps set karo</p>
+                <p className="text-xs text-gray-500 mb-3 flex items-center gap-2 flex-wrap">
+                  Like, Subscribe, Comment — daily caps set karo
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-700/40">Coming Soon — cap enforce nahi hota abhi</span>
+                </p>
                 <div className="space-y-3">
                   {/* Like */}
                   <div className="flex items-center gap-3 bg-gray-900 rounded-lg p-3">
@@ -670,11 +673,6 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
               {/* Proxy Info */}
               <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
                 <h3 className="text-white font-semibold text-sm mb-3 flex items-center gap-2"><Globe size={14} className="text-green-400" /> Proxy</h3>
-                {profile.proxyFingerprintPlaceholder && (
-                  <p className="text-[11px] text-amber-300/90 mb-2 leading-snug">
-                    Shown details match provider APIs / create-full snapshot only. Stop the profile before renew so MoreLogin/Multilogin can accept the new proxy.
-                  </p>
-                )}
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div className="bg-gray-900 rounded-lg px-3 py-2"><span className="text-gray-500 text-xs block">Server</span><span className="text-white font-mono text-xs">{profile.proxy.server}:{profile.proxy.port}</span></div>
                   <div className="bg-gray-900 rounded-lg px-3 py-2"><span className="text-gray-500 text-xs block">State/City</span><span className="text-white text-xs">{profile.proxy.state} / {profile.proxy.city}</span></div>
@@ -690,9 +688,6 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
               {/* Fingerprint */}
               <div className="bg-gray-800 rounded-xl p-4 border border-gray-700">
                 <h3 className="text-white font-semibold text-sm mb-3 flex items-center gap-2"><Fingerprint size={14} className="text-purple-400" /> Fingerprint</h3>
-                {profile.proxyFingerprintPlaceholder && (
-                  <p className="text-[11px] text-amber-300/90 mb-2 leading-snug">Backend fingerprint appears here after you create this profile through MMB create-full (stored locally as snapshot). ✓ Timezone auto-synced with proxy location.</p>
-                )}
                 <div className="grid grid-cols-2 gap-2 text-xs">
                   {/* BUG FIX #2: Show "Real" instead of "Masked" for WebRTC/Canvas to avoid bot detection */}
                   <div className="bg-gray-900 rounded-lg px-3 py-2"><span className="text-gray-500 block">Canvas</span><span className={`${profile.fingerprint.canvas === 'Masked' ? 'text-yellow-400' : 'text-purple-300'}`}>{profile.fingerprint.canvas === 'Masked' ? '✓ Real' : profile.fingerprint.canvas}</span></div>

@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Shuffle, Save, RotateCcw, Play, Eye, AlertTriangle, CheckCircle, Search, Download, Upload, Pin, Square,
+  Calendar, Timer, RefreshCw,
 } from 'lucide-react';
 import type { Profile } from '../types';
+import { inferProxyTypeFromProfile } from '../utils/profileAdapter';
 import type { Channel, Video } from '../store/useChannelStore';
 import LiveProgressPanel from './LiveProgressPanel';
 import { backendUrl } from '../services/backendOrigin';
@@ -19,6 +21,28 @@ import {
   pollShuffleRunUntilDone,
   pickRandomComment,
 } from '../utils/shuffleApi';
+import {
+  fetchRecycleStatus,
+  startRecycleLoop,
+  stopRecycleLoop,
+  formatCooldownRemaining,
+  recycleStatusLabel,
+  type RecycleStatus,
+} from '../utils/recycleApi';
+import {
+  type Schedule,
+  genScheduleId,
+  clampCountdownMinutes,
+  persistSchedule,
+  enrichScheduleForServer,
+  loadShuffleSchedules,
+  upsertSchedule,
+  loadSchedules,
+  saveSchedulesLocal,
+  formatCountdown,
+  countdownRemaining,
+} from '../utils/scheduleStore';
+import { syncSchedulesToServer, cancelServerScheduleTimer } from '../utils/scheduleApi';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // TYPES
@@ -83,6 +107,7 @@ interface VideoShufflePageProps {
   profiles: Profile[];
   channels: Channel[];
   getVideos: (channelId: number, filter?: string) => Video[];
+  onRefreshProfiles?: () => void;
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -137,18 +162,100 @@ function saveAssignments(assignments: ProfileAssignment[]) {
 
 const SHUFFLE_SETTINGS_KEY = 'mmb_shuffle_settings';
 
+type AssignmentMode = 'unique' | 'same-all';
+type ShuffleVideoQuality = '144p' | '240p' | '360p' | '480p' | '720p' | '1080p' | 'auto';
+const QUALITY_OPTIONS: ShuffleVideoQuality[] = ['auto', '144p', '240p', '360p', '480p', '720p', '1080p'];
+
 interface ShuffleSettings {
   channelConfigs: ChannelConfig[];
   enabledChannelIds: number[];
+  assignmentMode: AssignmentMode;
+  watchTimeMin: number;
+  watchTimeMax: number;
+  videoQuality: ShuffleVideoQuality;
+  sameModeManualPicks: Record<number, string>;
+  adSkipEnabled: boolean;
+  adSkipAfterSec: number;
+  midRollAdWaitSec: number;
 }
+
+const DEFAULT_SHUFFLE_SETTINGS: ShuffleSettings = {
+  channelConfigs: [],
+  enabledChannelIds: [],
+  assignmentMode: 'unique',
+  watchTimeMin: 80,
+  watchTimeMax: 100,
+  videoQuality: 'auto',
+  sameModeManualPicks: {},
+  adSkipEnabled: true,
+  adSkipAfterSec: 5,
+  midRollAdWaitSec: 10,
+};
 
 function loadShuffleSettings(): ShuffleSettings {
   try {
     const d = localStorage.getItem(SHUFFLE_SETTINGS_KEY);
-    if (d) return JSON.parse(d);
+    if (d) {
+      const parsed = JSON.parse(d) as Partial<ShuffleSettings>;
+      return normalizeShuffleSettings(parsed);
+    }
   } catch { /* ignore */ }
-  return { channelConfigs: [], enabledChannelIds: [] };
+  return { ...DEFAULT_SHUFFLE_SETTINGS };
 }
+
+function normalizeShuffleSettings(parsed: Partial<ShuffleSettings>): ShuffleSettings {
+  const merged = { ...DEFAULT_SHUFFLE_SETTINGS, ...parsed };
+  const picksRaw = merged.sameModeManualPicks;
+  const sameModeManualPicks: Record<number, string> = {};
+  if (picksRaw && typeof picksRaw === 'object') {
+    for (const [key, val] of Object.entries(picksRaw)) {
+      if (typeof val === 'string') sameModeManualPicks[Number(key)] = val;
+    }
+  }
+  return {
+    ...merged,
+    ...clampWatchRange(Number(merged.watchTimeMin), Number(merged.watchTimeMax)),
+    assignmentMode: merged.assignmentMode === 'same-all' ? 'same-all' : 'unique',
+    videoQuality: QUALITY_OPTIONS.includes(merged.videoQuality as ShuffleVideoQuality)
+      ? (merged.videoQuality as ShuffleVideoQuality)
+      : 'auto',
+    sameModeManualPicks,
+    adSkipEnabled: merged.adSkipEnabled !== false,
+    adSkipAfterSec: Math.max(0, Math.min(120, Number(merged.adSkipAfterSec) || 5)),
+    midRollAdWaitSec: Math.max(0, Math.min(120, Number(merged.midRollAdWaitSec) || 10)),
+  };
+}
+
+function clampWatchRange(min: number, max: number): { watchTimeMin: number; watchTimeMax: number } {
+  let watchTimeMin = Math.max(1, Math.min(100, Math.round(min)));
+  let watchTimeMax = Math.max(1, Math.min(100, Math.round(max)));
+  if (watchTimeMin > watchTimeMax) [watchTimeMin, watchTimeMax] = [watchTimeMax, watchTimeMin];
+  return { watchTimeMin, watchTimeMax };
+}
+
+type AssignedVideo = ProfileAssignment['videos'][number];
+
+interface ScheduleDraft {
+  name: string;
+  runMode: 'manual' | 'countdown' | 'scheduled';
+  countdownMinutes: number;
+  scheduledTime: number;
+  profileDelayMin: number;
+  profileDelayMax: number;
+  tabDelayMin: number;
+  tabDelayMax: number;
+}
+
+const DEFAULT_SCHEDULE_DRAFT: ScheduleDraft = {
+  name: '',
+  runMode: 'manual',
+  countdownMinutes: 5,
+  scheduledTime: 0,
+  profileDelayMin: 5,
+  profileDelayMax: 20,
+  tabDelayMin: 2,
+  tabDelayMax: 8,
+};
 
 function saveShuffleSettings(s: ShuffleSettings) {
   try { localStorage.setItem(SHUFFLE_SETTINGS_KEY, JSON.stringify(s)); } catch {}
@@ -189,7 +296,7 @@ function buildChannelConfigs(
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MAIN COMPONENT
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-export default function VideoShufflePage({ profiles, channels, getVideos }: VideoShufflePageProps) {
+export default function VideoShufflePage({ profiles, channels, getVideos, onRefreshProfiles }: VideoShufflePageProps) {
   const [settings, setSettings] = useState<ShuffleSettings>(() => loadShuffleSettings());
   const [channelConfigs, setChannelConfigs] = useState<ChannelConfig[]>([]);
   const [assignments, setAssignments] = useState<ProfileAssignment[]>(() => loadAssignments());
@@ -198,15 +305,26 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
   const [selectedProfileIds, setSelectedProfileIds] = useState<string[]>([]);
   const [isShuffled, setIsShuffled] = useState(false);
   const [running, setRunning] = useState(false);
-  const [runProgress, setRunProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
+  const [activeRunProfileIds, setActiveRunProfileIds] = useState<string[]>([]);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [concurrency, setConcurrency] = useState<{ limit: number; running: number; available: number } | null>(null);
   const [detailProfile, setDetailProfile] = useState<string | null>(null);
   const [poolExhaustedNotice, setPoolExhaustedNotice] = useState<string[]>([]);
+  const [runStatus, setRunStatus] = useState<{ type: 'info' | 'warn' | 'error' | 'success'; text: string } | null>(null);
   const [profileSearch, setProfileSearch] = useState('');
   const [profilePage, setProfilePage] = useState(1);
   const [serverSynced, setServerSynced] = useState(false);
+  const [scheduleDraft, setScheduleDraft] = useState<ScheduleDraft>(DEFAULT_SCHEDULE_DRAFT);
+  const [shuffleSchedules, setShuffleSchedules] = useState<Schedule[]>(() => loadShuffleSchedules());
+  const [scheduleNow, setScheduleNow] = useState(Date.now());
+  const [recycleStatus, setRecycleStatus] = useState<RecycleStatus | null>(null);
+  const [loopProfileIds, setLoopProfileIds] = useState<string[]>([]);
+  const [cooldownMin, setCooldownMin] = useState(10);
+  const [cooldownMax, setCooldownMax] = useState(30);
+  const [loopBusy, setLoopBusy] = useState(false);
   const stopPollRef = useRef<(() => void) | null>(null);
+  const runSavedScheduleRef = useRef<(s: Schedule) => Promise<void>>(async () => {});
+  const firedCountdownIds = useRef<Set<string>>(new Set());
   const profilesPerPage = 24;
 
   const profileIdSet = useMemo(() => new Set(profiles.map(p => p.id)), [profiles]);
@@ -226,10 +344,17 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
         assignments,
         channelConfigs,
         enabledChannelIds: settings.enabledChannelIds,
+        settings: settings as unknown as Record<string, unknown>,
+        recycleConfig: {
+          enabled: recycleStatus?.enabled ?? false,
+          profileIds: loopProfileIds,
+          cooldownMinMinutes: cooldownMin,
+          cooldownMaxMinutes: cooldownMax,
+        },
       });
     }, 800);
     return () => clearTimeout(t);
-  }, [assignments, channelConfigs, settings.enabledChannelIds, serverSynced]);
+  }, [assignments, channelConfigs, settings, loopProfileIds, cooldownMin, cooldownMax, serverSynced, recycleStatus?.enabled]);
 
   useEffect(() => {
     let cancelled = false;
@@ -241,11 +366,17 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
         saveAssignments(remote.assignments as ProfileAssignment[]);
       }
       if (remote?.channelConfigs?.length || remote?.enabledChannelIds?.length) {
-        setSettings({
-          channelConfigs: (remote.channelConfigs as ChannelConfig[]) || [],
-          enabledChannelIds: remote.enabledChannelIds || [],
-        });
+        setSettings(prev => normalizeShuffleSettings({
+          ...prev,
+          channelConfigs: (remote.channelConfigs as ChannelConfig[]) || prev.channelConfigs,
+          enabledChannelIds: remote.enabledChannelIds || prev.enabledChannelIds,
+          ...(remote.settings ? remote.settings as Partial<ShuffleSettings> : {}),
+        }));
       }
+      const rc = remote?.recycleConfig as { profileIds?: string[]; cooldownMinMinutes?: number; cooldownMaxMinutes?: number } | undefined;
+      if (rc?.profileIds?.length) setLoopProfileIds(rc.profileIds.filter((id) => profiles.some((p) => p.id === id)));
+      if (typeof rc?.cooldownMinMinutes === 'number') setCooldownMin(rc.cooldownMinMinutes);
+      if (typeof rc?.cooldownMaxMinutes === 'number') setCooldownMax(rc.cooldownMaxMinutes);
       setServerSynced(true);
     })();
     return () => { cancelled = true; };
@@ -262,7 +393,71 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
     return () => clearInterval(t);
   }, []);
 
+  useEffect(() => {
+    const poll = () => { void fetchRecycleStatus().then(setRecycleStatus); };
+    poll();
+    const t = setInterval(poll, 4000);
+    return () => clearInterval(t);
+  }, []);
+
+  const toggleLoopProfile = (id: string) => {
+    setLoopProfileIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+
+  const handleStartLoop = async () => {
+    if (loopProfileIds.length === 0) {
+      setRunStatus({ type: 'warn', text: '24/7 loop: pehle kam se kam 1 profile select karo' });
+      return;
+    }
+    if (channelConfigs.length === 0) {
+      setRunStatus({ type: 'warn', text: '24/7 loop: pehle channels enable karo' });
+      return;
+    }
+    setLoopBusy(true);
+    const payload = loopProfileIds
+      .map(id => profiles.find(p => p.id === id))
+      .filter(Boolean)
+      .map(p => ({
+        id: p!.id,
+        name: p!.name,
+        os: p!.os,
+        browserType: p!.browserType || 'multilogin',
+        proxyType: inferProxyTypeFromProfile(p!),
+      }));
+    const r = await startRecycleLoop({
+      profiles: payload,
+      cooldownMinMinutes: cooldownMin,
+      cooldownMaxMinutes: cooldownMax,
+    });
+    setLoopBusy(false);
+    if (r.ok) {
+      setRecycleStatus(r.status || null);
+      setRunStatus({ type: 'success', text: `24/7 loop ON — ${payload.length} profile(s), cooldown ${cooldownMin}–${cooldownMax} min` });
+      void postActivityLog('success', `24/7 recycle started — ${payload.length} profiles`, { source: 'shuffle' });
+    } else {
+      setRunStatus({ type: 'error', text: r.error || '24/7 start failed' });
+    }
+  };
+
+  const handleStopLoop = async () => {
+    setLoopBusy(true);
+    await stopRecycleLoop();
+    setRecycleStatus(await fetchRecycleStatus());
+    setLoopBusy(false);
+    setRunStatus({ type: 'info', text: '24/7 loop stopped' });
+    void postActivityLog('info', '24/7 recycle stopped', { source: 'shuffle' });
+  };
+
   useEffect(() => () => { stopPollRef.current?.(); }, []);
+
+  useEffect(() => {
+    const t = setInterval(() => setScheduleNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const refreshShuffleSchedules = useCallback(() => {
+    setShuffleSchedules(loadShuffleSchedules());
+  }, []);
 
   useEffect(() => {
     if (profiles.length === 0) {
@@ -299,7 +494,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
   const totalPool = useMemo(() => channelConfigs.reduce((sum, c) => sum + c.totalVideos, 0), [channelConfigs]);
   const totalAssigned = useMemo(() => assignments.reduce((sum, a) => sum + a.videos.length, 0), [assignments]);
   const hasOverlap = useMemo(() => {
-    // Check if any 2 profiles have same video in current assignments
+    if (settings.assignmentMode === 'same-all') return false;
     const videoMap = new Map<string, string[]>();
     for (const a of assignments) {
       for (const v of a.videos) {
@@ -308,8 +503,10 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
         videoMap.get(key)!.push(a.profileId);
       }
     }
-    return [...videoMap.values()].some(profiles => profiles.length > 1);
-  }, [assignments]);
+    return [...videoMap.values()].some(ids => ids.length > 1);
+  }, [assignments, settings.assignmentMode]);
+
+  const sameVideoActive = settings.assignmentMode === 'same-all' && assignments.some(a => a.videos.length > 0);
 
   const watchedCountsByProfile = useMemo(() => {
     const out: Record<string, number> = {};
@@ -341,158 +538,197 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // SHUFFLE ALGORITHM
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  const shuffleAll = useCallback(() => {
-    const profilesToShuffle = profiles; // Always shuffle ALL
-    
-    const newAssignments: ProfileAssignment[] = [];
-    const usedInThisRun = new Set<string>();
-    const notices: string[] = [];
+  const pickUniqueVideosForProfile = useCallback((
+    profileId: string,
+    profileName: string,
+    usedInThisRun: Set<string>,
+    notices: string[],
+  ): AssignedVideo[] => {
+    const profileVideos: AssignedVideo[] = [];
 
-    for (const profile of profilesToShuffle) {
-      const profileVideos: ProfileAssignment['videos'] = [];
+    for (const config of channelConfigs) {
+      const allChannelVideos = getVideos(config.channelId, 'enabled');
+      if (allChannelVideos.length === 0) continue;
 
-      for (const config of channelConfigs) {
-        const allChannelVideos = getVideos(config.channelId, 'enabled');
-        if (allChannelVideos.length === 0) continue;
+      const count = Math.floor(Math.random() * (config.maxPerProfile - config.minPerProfile + 1)) + config.minPerProfile;
 
-        // Random count between min-max
-        const count = Math.floor(Math.random() * (config.maxPerProfile - config.minPerProfile + 1)) + config.minPerProfile;
+      let available = allChannelVideos.filter(v =>
+        !videoIsWatched(profileId, v, watchHistory, serverHist) && !usedInThisRun.has(v.video_id),
+      );
 
-        // Filter: unwatched by this profile (local + server titles) + not used in this run
-        let available = allChannelVideos.filter(v =>
-          !videoIsWatched(profile.id, v, watchHistory, serverHist) && !usedInThisRun.has(v.video_id)
-        );
-
-        // Pool exhausted? Allow repeat with notice
-        if (available.length < count) {
-          notices.push(`${profile.name}: Pool exhausted for "${config.channelName}" — repeating oldest`);
-          // Add back oldest watched (but still avoid same-run overlap)
-          const oldestWatched = allChannelVideos
-            .filter(v => !usedInThisRun.has(v.video_id))
-            .sort((a, b) => {
-              const aTime = videoLastWatchedAt(profile.id, a, watchHistory, serverHist);
-              const bTime = videoLastWatchedAt(profile.id, b, watchHistory, serverHist);
-              return aTime - bTime; // oldest first
-            });
-          available = [...available, ...oldestWatched];
-          // Remove duplicates
-          available = [...new Map(available.map(v => [v.video_id, v])).values()];
-        }
-
-        // Shuffle available videos randomly
-        const shuffled = [...available].sort(() => Math.random() - 0.5);
-
-        // Pick 'count' videos — ensure we always get exactly 'count' by repeating if needed
-        let picked = shuffled.slice(0, Math.min(count, shuffled.length));
-        if (picked.length < count && shuffled.length > 0) {
-          // If still short, cycle through available again to reach count
-          while (picked.length < count) {
-            const nextCycle = shuffled.slice(0, count - picked.length);
-            picked = [...picked, ...nextCycle];
-          }
-        }
-
-        for (const video of picked) {
-          usedInThisRun.add(video.video_id);
-          profileVideos.push({
-            channelId: config.channelId,
-            channelName: config.channelName,
-            videoId: video.video_id,
-            title: video.title,
-            url: video.url,
+      if (available.length < count) {
+        notices.push(`${profileName}: Pool exhausted for "${config.channelName}" — repeating oldest`);
+        const oldestWatched = allChannelVideos
+          .filter(v => !usedInThisRun.has(v.video_id))
+          .sort((a, b) => {
+            const aTime = videoLastWatchedAt(profileId, a, watchHistory, serverHist);
+            const bTime = videoLastWatchedAt(profileId, b, watchHistory, serverHist);
+            return aTime - bTime;
           });
+        available = [...new Map([...available, ...oldestWatched].map(v => [v.video_id, v])).values()];
+      }
+
+      const shuffled = [...available].sort(() => Math.random() - 0.5);
+      let picked = shuffled.slice(0, Math.min(count, shuffled.length));
+      if (picked.length < count && shuffled.length > 0) {
+        while (picked.length < count) {
+          picked = [...picked, ...shuffled.slice(0, count - picked.length)];
         }
       }
 
+      for (const video of picked) {
+        usedInThisRun.add(video.video_id);
+        profileVideos.push({
+          channelId: config.channelId,
+          channelName: config.channelName,
+          videoId: video.video_id,
+          title: video.title,
+          url: video.url,
+        });
+      }
+    }
+
+    return profileVideos;
+  }, [channelConfigs, getVideos, watchHistory, serverHist]);
+
+  const sameModePicks = useMemo(
+    () => settings.sameModeManualPicks ?? {},
+    [settings.sameModeManualPicks],
+  );
+
+  const pickSameVideosPerChannel = useCallback((notices: string[]): AssignedVideo[] => {
+    const shared: AssignedVideo[] = [];
+
+    for (const config of channelConfigs) {
+      const allChannelVideos = getVideos(config.channelId, 'enabled');
+      if (allChannelVideos.length === 0) continue;
+
+      const manualPick = sameModePicks[config.channelId] ?? sameModePicks[Number(config.channelId) as unknown as number];
+      if (manualPick && manualPick !== 'random') {
+        const fixed = allChannelVideos.find(v => v.video_id === manualPick);
+        if (fixed) {
+          shared.push({
+            channelId: config.channelId,
+            channelName: config.channelName,
+            videoId: fixed.video_id,
+            title: fixed.title,
+            url: fixed.url,
+          });
+          continue;
+        }
+        notices.push(`"${config.channelName}": selected video missing — random pick used`);
+      }
+
+      const unwatched = allChannelVideos.filter(v =>
+        !profiles.some(p => videoIsWatched(p.id, v, watchHistory, serverHist)),
+      );
+      if (unwatched.length === 0 && allChannelVideos.length > 0) {
+        notices.push(`"${config.channelName}": pool exhausted — random repeat`);
+      }
+      const pickFrom = unwatched.length ? unwatched : allChannelVideos;
+      const picked = pickFrom[Math.floor(Math.random() * pickFrom.length)];
+      shared.push({
+        channelId: config.channelId,
+        channelName: config.channelName,
+        videoId: picked.video_id,
+        title: picked.title,
+        url: picked.url,
+      });
+    }
+
+    return shared;
+  }, [channelConfigs, getVideos, profiles, watchHistory, serverHist, sameModePicks]);
+
+  const shuffleAll = useCallback(() => {
+    const notices: string[] = [];
+
+    if (settings.assignmentMode === 'same-all') {
+      const shared = pickSameVideosPerChannel(notices);
+      const newAssignments = profiles.map(profile => ({
+        profileId: profile.id,
+        profileName: profile.name,
+        videos: shared.map(v => ({ ...v })),
+      }));
+      setAssignments(newAssignments);
+      setPoolExhaustedNotice(notices);
+      setIsShuffled(true);
+      return;
+    }
+
+    const usedInThisRun = new Set<string>();
+    const newAssignments = profiles.map(profile => ({
+      profileId: profile.id,
+      profileName: profile.name,
+      videos: pickUniqueVideosForProfile(profile.id, profile.name, usedInThisRun, notices),
+    }));
+
+    setAssignments(newAssignments);
+    setPoolExhaustedNotice(notices);
+    setIsShuffled(true);
+  }, [profiles, settings.assignmentMode, pickSameVideosPerChannel, pickUniqueVideosForProfile]);
+
+  const shuffleSelected = useCallback(() => {
+    if (selectedProfileIds.length === 0) return;
+    const notices: string[] = [];
+
+    if (settings.assignmentMode === 'same-all') {
+      const shared = pickSameVideosPerChannel(notices);
+      const newAssignments = assignments.map(a =>
+        selectedProfileIds.includes(a.profileId)
+          ? { ...a, videos: shared.map(v => ({ ...v })) }
+          : a,
+      );
+      for (const profile of profiles.filter(p => selectedProfileIds.includes(p.id) && !newAssignments.some(a => a.profileId === p.id))) {
+        newAssignments.push({ profileId: profile.id, profileName: profile.name, videos: shared.map(v => ({ ...v })) });
+      }
+      setAssignments(newAssignments);
+      setPoolExhaustedNotice(notices);
+      setIsShuffled(true);
+      return;
+    }
+
+    const existingOthers = assignments.filter(a => !selectedProfileIds.includes(a.profileId));
+    const usedInThisRun = new Set(existingOthers.flatMap(a => a.videos.map(v => v.videoId)));
+    const newAssignments: ProfileAssignment[] = [...existingOthers];
+
+    for (const profile of profiles.filter(p => selectedProfileIds.includes(p.id))) {
       newAssignments.push({
         profileId: profile.id,
         profileName: profile.name,
-        videos: profileVideos,
+        videos: pickUniqueVideosForProfile(profile.id, profile.name, usedInThisRun, notices),
       });
     }
 
     setAssignments(newAssignments);
     setPoolExhaustedNotice(notices);
     setIsShuffled(true);
-  }, [profiles, channelConfigs, getVideos, watchHistory, serverHist]);
+  }, [selectedProfileIds, profiles, assignments, settings.assignmentMode, pickSameVideosPerChannel, pickUniqueVideosForProfile]);
 
-  // Shuffle ONLY selected profiles (keep others unchanged)
-  const shuffleSelected = useCallback(() => {
-    if (selectedProfileIds.length === 0) return;
-    
-    // Keep existing assignments for non-selected profiles
-    const existingOthers = assignments.filter(a => !selectedProfileIds.includes(a.profileId));
-    const usedByOthers = new Set(existingOthers.flatMap(a => a.videos.map(v => v.videoId)));
-    
-    const newAssignments: ProfileAssignment[] = [...existingOthers];
-    const usedInThisRun = new Set(usedByOthers);
-    const notices: string[] = [];
-
-    for (const profile of profiles.filter(p => selectedProfileIds.includes(p.id))) {
-      const profileVideos: ProfileAssignment['videos'] = [];
-
-      for (const config of channelConfigs) {
-        const allChannelVideos = getVideos(config.channelId, 'enabled');
-        if (allChannelVideos.length === 0) continue;
-        const count = Math.floor(Math.random() * (config.maxPerProfile - config.minPerProfile + 1)) + config.minPerProfile;
-
-        let available = allChannelVideos.filter(v =>
-          !videoIsWatched(profile.id, v, watchHistory, serverHist) && !usedInThisRun.has(v.video_id)
-        );
-
-        if (available.length < count) {
-          notices.push(`${profile.name}: Pool exhausted for "${config.channelName}" — repeating oldest`);
-          const oldestWatched = allChannelVideos
-            .filter(v => !usedInThisRun.has(v.video_id))
-            .sort((a, b) => {
-              const aTime = videoLastWatchedAt(profile.id, a, watchHistory, serverHist);
-              const bTime = videoLastWatchedAt(profile.id, b, watchHistory, serverHist);
-              return aTime - bTime;
-            });
-          available = [...available, ...oldestWatched];
-          available = [...new Map(available.map(v => [v.video_id, v])).values()];
-        }
-
-        const shuffled = [...available].sort(() => Math.random() - 0.5);
-        let picked = shuffled.slice(0, Math.min(count, shuffled.length));
-        if (picked.length < count && shuffled.length > 0) {
-          while (picked.length < count) {
-            const nextCycle = shuffled.slice(0, count - picked.length);
-            picked = [...picked, ...nextCycle];
-          }
-        }
-
-        for (const video of picked) {
-          usedInThisRun.add(video.video_id);
-          profileVideos.push({ channelId: config.channelId, channelName: config.channelName, videoId: video.video_id, title: video.title, url: video.url });
-        }
-      }
-
-      newAssignments.push({ profileId: profile.id, profileName: profile.name, videos: profileVideos });
-    }
-
-    setAssignments(newAssignments);
-    setPoolExhaustedNotice(notices);
-    setIsShuffled(true);
-  }, [selectedProfileIds, profiles, channelConfigs, getVideos, watchHistory, serverHist, assignments]);
-
-  // Reshuffle single profile
   const reshuffleSingle = useCallback((profileId: string) => {
-    const usedByOthers = new Set(
-      assignments.filter(a => a.profileId !== profileId).flatMap(a => a.videos.map(v => v.videoId))
-    );
     const profile = profiles.find(p => p.id === profileId);
     if (!profile) return;
+    const notices: string[] = [];
 
-    const profileVideos: ProfileAssignment['videos'] = [];
+    if (settings.assignmentMode === 'same-all') {
+      const shared = pickSameVideosPerChannel(notices);
+      setAssignments(prev => prev.map(a => ({ ...a, videos: shared.map(v => ({ ...v })) })));
+      if (notices.length) setPoolExhaustedNotice(notices);
+      setIsShuffled(true);
+      return;
+    }
+
+    const usedByOthers = new Set(
+      assignments.filter(a => a.profileId !== profileId).flatMap(a => a.videos.map(v => v.videoId)),
+    );
     const usedInThisRun = new Set<string>();
+    const profileVideos: AssignedVideo[] = [];
 
     for (const config of channelConfigs) {
       const allChannelVideos = getVideos(config.channelId, 'enabled');
       const count = Math.floor(Math.random() * (config.maxPerProfile - config.minPerProfile + 1)) + config.minPerProfile;
 
       let available = allChannelVideos.filter(v =>
-        !videoIsWatched(profileId, v, watchHistory, serverHist) && !usedByOthers.has(v.video_id) && !usedInThisRun.has(v.video_id)
+        !videoIsWatched(profileId, v, watchHistory, serverHist) && !usedByOthers.has(v.video_id) && !usedInThisRun.has(v.video_id),
       );
 
       if (available.length < count) {
@@ -515,7 +751,8 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
     }
 
     setAssignments(prev => prev.map(a => a.profileId === profileId ? { ...a, videos: profileVideos } : a));
-  }, [assignments, channelConfigs, getVideos, watchHistory, serverHist, profiles]);
+    setIsShuffled(true);
+  }, [assignments, channelConfigs, getVideos, watchHistory, serverHist, profiles, settings.assignmentMode, pickSameVideosPerChannel]);
 
   const updateChannelConfig = (channelId: number, patch: Partial<ChannelConfig>) => {
     setChannelConfigs(prev => {
@@ -563,7 +800,16 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
   };
 
   const handleExport = () => {
-    const blob = new Blob([JSON.stringify({ assignments, channelConfigs, enabledChannelIds: settings.enabledChannelIds }, null, 2)], { type: 'application/json' });
+    const blob = new Blob([JSON.stringify({
+      assignments,
+      channelConfigs,
+      enabledChannelIds: settings.enabledChannelIds,
+      assignmentMode: settings.assignmentMode,
+      watchTimeMin: settings.watchTimeMin,
+      watchTimeMax: settings.watchTimeMax,
+      videoQuality: settings.videoQuality,
+      sameModeManualPicks: settings.sameModeManualPicks,
+    }, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `mmb-shuffle-${new Date().toISOString().slice(0, 10)}.json`;
@@ -581,11 +827,19 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
       try {
         const parsed = JSON.parse(await file.text());
         if (parsed.assignments) setAssignments(parsed.assignments);
-        if (parsed.channelConfigs || parsed.enabledChannelIds) {
-          setSettings({
-            channelConfigs: parsed.channelConfigs || [],
-            enabledChannelIds: parsed.enabledChannelIds || [],
-          });
+        if (parsed.channelConfigs || parsed.enabledChannelIds || parsed.assignmentMode) {
+          setSettings(prev => normalizeShuffleSettings({
+            ...prev,
+            channelConfigs: parsed.channelConfigs || prev.channelConfigs,
+            enabledChannelIds: parsed.enabledChannelIds || prev.enabledChannelIds,
+            assignmentMode: parsed.assignmentMode === 'same-all' ? 'same-all' : parsed.assignmentMode === 'unique' ? 'unique' : prev.assignmentMode,
+            watchTimeMin: Number(parsed.watchTimeMin ?? prev.watchTimeMin),
+            watchTimeMax: Number(parsed.watchTimeMax ?? prev.watchTimeMax),
+            videoQuality: QUALITY_OPTIONS.includes(parsed.videoQuality) ? parsed.videoQuality : prev.videoQuality,
+            sameModeManualPicks: parsed.sameModeManualPicks && typeof parsed.sameModeManualPicks === 'object'
+              ? parsed.sameModeManualPicks as Record<number, string>
+              : prev.sameModeManualPicks,
+          }));
         }
         setIsShuffled(true);
       } catch {
@@ -615,51 +869,152 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
     stopPollRef.current = null;
     setRunning(false);
     setActiveRunId(null);
-    setRunProgress(null);
+    setActiveRunProfileIds([]);
   };
 
-  const buildSchedulePayload = (profilesToRun: ProfileAssignment[], scheduleId: string, name: string) => ({
-    id: scheduleId,
-    name,
-    selectedProfiles: profilesToRun.map(a => a.profileId),
-    selectedChannels: channelConfigs.map(c => c.channelId),
-    assignmentMode: 'per-profile' as const,
-    sameForAll: [] as [],
-    perProfile: profilesToRun.map(a => ({
-      profileId: a.profileId,
-      channelSelections: channelConfigs.map(config => ({
-        channelId: config.channelId,
-        channelName: config.channelName,
-        videos: a.videos.filter(v => v.channelId === config.channelId).map(toScheduleVideo),
-      })),
-    })),
-    profileConfigs: profileConfigsForSchedule(profilesToRun.map(a => a.profileId), profiles),
-    profileDelayMin: 5,
-    profileDelayMax: 20,
-    tabDelayMin: 2,
-    tabDelayMax: 8,
-    commentText: pickRandomComment(),
-    runMode: 'manual' as const,
-  });
+  const setSameModePick = (channelId: number, videoId: string) => {
+    setSettings(s => ({
+      ...s,
+      sameModeManualPicks: { ...(s.sameModeManualPicks ?? {}), [channelId]: videoId },
+    }));
+    if (settings.assignmentMode !== 'same-all') return;
 
-  const afterRunStarted = (scheduleId: string, profileIds: string[]) => {
+    const config = channelConfigs.find(c => c.channelId === channelId);
+    if (!config) return;
+
+    if (videoId === 'random') {
+      const notices: string[] = [];
+      const shared = pickSameVideosPerChannel(notices);
+      setAssignments(prev => prev.map(a => ({ ...a, videos: shared.map(v => ({ ...v })) })));
+      if (notices.length) setPoolExhaustedNotice(notices);
+      setIsShuffled(true);
+      return;
+    }
+
+    const video = getVideos(channelId, 'enabled').find(v => v.video_id === videoId);
+    if (!video) return;
+    const entry: AssignedVideo = {
+      channelId,
+      channelName: config.channelName,
+      videoId: video.video_id,
+      title: video.title,
+      url: video.url,
+    };
+    setAssignments(prev => prev.map(a => {
+      const others = a.videos.filter(v => v.channelId !== channelId);
+      return { ...a, videos: [...others, entry] };
+    }));
+    setIsShuffled(true);
+  };
+
+  const buildSchedulePayload = (profilesToRun: ProfileAssignment[], scheduleId: string, name: string) => {
+    const { watchTimeMin, watchTimeMax } = clampWatchRange(settings.watchTimeMin, settings.watchTimeMax);
+    const profileConfigs = profileConfigsForSchedule(profilesToRun.map(a => a.profileId), profiles).map(cfg => ({
+      ...cfg,
+      watchTimeMin,
+      watchTimeMax,
+      videoQuality: settings.videoQuality,
+      adSkipEnabled: settings.adSkipEnabled,
+      adSkipAfterSec: settings.adSkipAfterSec,
+      midRollAdWaitSec: settings.midRollAdWaitSec,
+      humanEngagementEnabled: true,
+      seekForwardMax: 2,
+      seekForwardSec: 10,
+    }));
+
+    const sameForAll = settings.assignmentMode === 'same-all' && profilesToRun[0]
+      ? channelConfigs.map(config => ({
+          channelId: config.channelId,
+          channelName: config.channelName,
+          videos: profilesToRun[0].videos
+            .filter(v => v.channelId === config.channelId)
+            .map(toScheduleVideo),
+        }))
+      : [];
+
+    return {
+      id: scheduleId,
+      name,
+      selectedProfiles: profilesToRun.map(a => a.profileId),
+      selectedChannels: channelConfigs.map(c => c.channelId),
+      assignmentMode: settings.assignmentMode === 'same-all' ? 'same-all' as const : 'per-profile' as const,
+      sameForAll,
+      perProfile: settings.assignmentMode === 'same-all'
+        ? []
+        : profilesToRun.map(a => ({
+            profileId: a.profileId,
+            channelSelections: channelConfigs.map(config => ({
+              channelId: config.channelId,
+              channelName: config.channelName,
+              videos: a.videos.filter(v => v.channelId === config.channelId).map(toScheduleVideo),
+            })),
+          })),
+      profileConfigs,
+      profileDelayMin: scheduleDraft.profileDelayMin,
+      profileDelayMax: scheduleDraft.profileDelayMax,
+      tabDelayMin: scheduleDraft.tabDelayMin,
+      tabDelayMax: scheduleDraft.tabDelayMax,
+      commentText: pickRandomComment(),
+      runMode: scheduleDraft.runMode,
+    };
+  };
+
+  const getProfilesToRun = useCallback((): ProfileAssignment[] => {
+    return selectedProfileIds.length > 0
+      ? assignments.filter(a => selectedProfileIds.includes(a.profileId))
+      : assignments;
+  }, [selectedProfileIds, assignments]);
+
+  const buildScheduleFromShuffle = useCallback((profilesToRun: ProfileAssignment[], name: string, id?: string): Schedule => {
+    const scheduleId = id || genScheduleId();
+    const payload = buildSchedulePayload(profilesToRun, scheduleId, name);
+    return {
+      id: scheduleId,
+      name,
+      selectedProfiles: payload.selectedProfiles,
+      selectedChannels: payload.selectedChannels,
+      assignmentMode: payload.assignmentMode,
+      sameForAll: payload.sameForAll,
+      perProfile: payload.perProfile,
+      profileDelayMin: scheduleDraft.profileDelayMin,
+      profileDelayMax: scheduleDraft.profileDelayMax,
+      tabDelayMin: scheduleDraft.tabDelayMin,
+      tabDelayMax: scheduleDraft.tabDelayMax,
+      runMode: scheduleDraft.runMode,
+      countdownMinutes: clampCountdownMinutes(scheduleDraft.countdownMinutes),
+      scheduledTime: scheduleDraft.scheduledTime,
+      repeatEnabled: false,
+      repeatInterval: '6hr',
+      status: 'idle',
+      createdAt: Date.now(),
+      lastRun: null,
+      startedAt: null,
+      progress: { total: profilesToRun.length, done: 0, failed: 0 },
+      profileConfigs: payload.profileConfigs as Record<string, unknown>[],
+      createdFrom: 'shuffle',
+    };
+  }, [buildSchedulePayload, scheduleDraft]);
+
+  const afterRunStarted = useCallback((scheduleId: string, profileIds: string[]) => {
     setActiveRunId(scheduleId);
+    setActiveRunProfileIds(profileIds);
     setRunning(true);
     stopPollRef.current?.();
     stopPollRef.current = pollShuffleRunUntilDone(profileIds, (stats) => {
-      setRunProgress({ done: stats.done, total: stats.total, failed: stats.error });
       if (stats.total > 0 && stats.running === 0 && stats.waiting === 0) {
         setRunning(false);
         setActiveRunId(null);
+        setActiveRunProfileIds([]);
         void refreshShuffleHistoryFromBackend();
+        refreshShuffleSchedules();
       }
     });
-  };
+  }, [refreshShuffleHistoryFromBackend, refreshShuffleSchedules]);
 
   const runSingleProfile = async (profileId: string) => {
     const assignment = assignments.find(a => a.profileId === profileId);
     if (!assignment || !assignment.videos.length) {
-      window.alert('No videos assigned — shuffle first.');
+      setRunStatus({ type: 'warn', text: 'No videos assigned — shuffle first.' });
       return;
     }
     const scheduleId = 'shuffle_single_' + Date.now();
@@ -675,40 +1030,37 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
       if (!res.ok || !data?.success) {
         const msg = data?.error || data?.message || 'Run failed — is backend running?';
         void postActivityLog('error', `Shuffle single failed: ${msg}`, { source: 'shuffle' });
-        window.alert(msg);
+        setRunStatus({ type: 'error', text: msg });
         return;
       }
+      setRunStatus({ type: 'success', text: `Started run for ${assignment.profileName}` });
       afterRunStarted(scheduleId, [profileId]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Run failed';
       void postActivityLog('error', `Shuffle single error: ${msg}`, { source: 'shuffle' });
-      window.alert(msg);
+      setRunStatus({ type: 'error', text: msg });
     }
   };
 
   const handleRunAll = async () => {
-    const profilesToRun = selectedProfileIds.length > 0
-      ? assignments.filter(a => selectedProfileIds.includes(a.profileId))
-      : assignments;
+    const profilesToRun = getProfilesToRun();
 
     if (profilesToRun.length === 0) {
-      window.alert('Shuffle karo pehle — koi assignment nahi.');
+      setRunStatus({ type: 'warn', text: 'Shuffle karo pehle — koi assignment nahi.' });
       return;
     }
 
     const conc = await fetchConcurrency();
-    if (conc && profilesToRun.length > conc.available) {
-      const ok = window.confirm(
-        `Concurrency: ${conc.running}/${conc.limit} running, ${conc.available} slots free.\n` +
-        `${profilesToRun.length} profiles selected — server may trim.\n\nContinue?`,
-      );
-      if (!ok) return;
-    }
-
     const mlxCount = profilesToRun.filter(a => profiles.find(p => p.id === a.profileId)?.browserType === 'multilogin').length;
+    const runHints: string[] = [];
+    if (conc && profilesToRun.length > conc.available) {
+      runHints.push(`Concurrency: ${conc.running}/${conc.limit} running — server may trim to ${conc.available} slots`);
+    }
     if (mlxCount > 3) {
-      const ok = window.confirm(`Multilogin: ${mlxCount} profiles — batched ~3 at a time. Continue?`);
-      if (!ok) return;
+      runHints.push(`Multilogin: ${mlxCount} profiles — batched ~3 at a time`);
+    }
+    if (runHints.length) {
+      setRunStatus({ type: 'info', text: runHints.join(' · ') });
     }
 
     const scheduleId = 'shuffle_' + Date.now();
@@ -724,23 +1076,145 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
       if (!res.ok || !data?.success) {
         const msg = data?.error || data?.message || 'Run failed — check backend + MoreLogin/Multilogin.';
         void postActivityLog('error', `Shuffle run failed: ${msg}`, { source: 'shuffle' });
-        window.alert(msg);
+        setRunStatus({ type: 'error', text: msg });
         return;
       }
-      if ((data.skippedNoVideos || 0) > 0) {
-        window.alert(`${data.skippedNoVideos} profile(s) skipped — no videos. Reshuffle those profiles.`);
-      }
-      if (data.trimmed) {
-        window.alert(`Started ${data.workersSpawned} workers (concurrency limit ${data.limit}).`);
-      }
+      const parts: string[] = [`Run started (${profilesToRun.length} profiles)`];
+      if ((data.skippedNoVideos || 0) > 0) parts.push(`${data.skippedNoVideos} skipped — no videos`);
+      if (data.trimmed) parts.push(`${data.workersSpawned} workers (limit ${data.limit})`);
+      setRunStatus({ type: 'success', text: parts.join(' · ') });
       afterRunStarted(scheduleId, profilesToRun.map(a => a.profileId));
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Run failed';
       void postActivityLog('error', `Shuffle run error: ${msg}`, { source: 'shuffle' });
-      window.alert(msg);
+      setRunStatus({ type: 'error', text: msg });
       setRunning(false);
     }
   };
+
+  const runSavedSchedule = useCallback(async (schedule: Schedule) => {
+    if (firedCountdownIds.current.has(schedule.id)) return;
+    firedCountdownIds.current.add(schedule.id);
+
+    const runningSchedule: Schedule = {
+      ...schedule,
+      status: 'running',
+      lastRun: Date.now(),
+      progress: { total: schedule.selectedProfiles.length, done: 0, failed: 0 },
+    };
+    upsertSchedule(runningSchedule);
+    refreshShuffleSchedules();
+
+    try {
+      const scheduleData = {
+        ...enrichScheduleForServer(runningSchedule, profiles),
+        commentText: pickRandomComment(),
+      };
+
+      const res = await fetch(backendUrl('/api/schedule/run'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ schedule: scheduleData }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.success) {
+        const msg = data?.error || data?.message || 'Schedule run failed';
+        upsertSchedule({ ...runningSchedule, status: 'failed', lastRunError: msg });
+        refreshShuffleSchedules();
+        setRunStatus({ type: 'error', text: `"${schedule.name}": ${msg}` });
+        firedCountdownIds.current.delete(schedule.id);
+        return;
+      }
+
+      const parts = [`Schedule "${schedule.name}" started`];
+      if (data.trimmed) parts.push(`${data.workersSpawned} workers (limit ${data.limit})`);
+      setRunStatus({ type: 'success', text: parts.join(' · ') });
+      afterRunStarted(schedule.id, schedule.selectedProfiles);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Run failed';
+      upsertSchedule({ ...runningSchedule, status: 'failed', lastRunError: msg });
+      refreshShuffleSchedules();
+      setRunStatus({ type: 'error', text: msg });
+      firedCountdownIds.current.delete(schedule.id);
+    }
+  }, [profiles, refreshShuffleSchedules, afterRunStarted]);
+
+  useEffect(() => {
+    runSavedScheduleRef.current = runSavedSchedule;
+  }, [runSavedSchedule]);
+
+  useEffect(() => {
+    for (const s of shuffleSchedules) {
+      if (s.status !== 'countdown' || !s.startedAt) continue;
+      const remaining = countdownRemaining(s, scheduleNow);
+      if (remaining <= 0 && !firedCountdownIds.current.has(s.id)) {
+        void runSavedScheduleRef.current(s);
+      }
+    }
+  }, [scheduleNow, shuffleSchedules]);
+
+  const handleSaveSchedule = async (startCountdown: boolean) => {
+    const profilesToRun = getProfilesToRun();
+    if (profilesToRun.length === 0) {
+      setRunStatus({ type: 'warn', text: 'Shuffle karo pehle — schedule ke liye assignment chahiye.' });
+      return;
+    }
+    const name = scheduleDraft.name.trim() || `Shuffle ${new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+    const schedule = buildScheduleFromShuffle(profilesToRun, name);
+
+    if (startCountdown) {
+      schedule.runMode = 'countdown';
+    } else if (scheduleDraft.runMode === 'scheduled' && scheduleDraft.scheduledTime > Date.now()) {
+      schedule.runMode = 'scheduled';
+      schedule.scheduledTime = scheduleDraft.scheduledTime;
+    } else {
+      schedule.runMode = scheduleDraft.runMode;
+    }
+
+    schedule.countdownMinutes = clampCountdownMinutes(scheduleDraft.countdownMinutes);
+    schedule.scheduledTime = scheduleDraft.scheduledTime;
+
+    const saveMode = startCountdown
+      ? 'countdown'
+      : schedule.runMode === 'scheduled' && schedule.scheduledTime > Date.now()
+        ? 'scheduled'
+        : 'idle';
+
+    const result = await persistSchedule(schedule, profiles, saveMode);
+    refreshShuffleSchedules();
+
+    if (!result.ok) {
+      setRunStatus({ type: 'error', text: result.error || 'Schedule save failed' });
+      return;
+    }
+
+    firedCountdownIds.current.delete(result.schedule.id);
+    const msg = startCountdown
+      ? `Schedule saved — countdown ${result.schedule.countdownMinutes} min shuru`
+      : result.schedule.status === 'scheduled'
+        ? `Schedule saved — ${new Date(result.schedule.scheduledTime).toLocaleString()} par chalega`
+        : `Schedule "${result.schedule.name}" saved — Scheduler page par bhi dikhega`;
+    setRunStatus({ type: 'success', text: msg });
+    if (!scheduleDraft.name.trim()) {
+      setScheduleDraft(d => ({ ...d, name: result.schedule.name }));
+    }
+  };
+
+  const handleCancelScheduleWait = async (scheduleId: string) => {
+    await cancelServerScheduleTimer(scheduleId);
+    const all = loadSchedules();
+    const next = all.map(s => s.id === scheduleId ? { ...s, status: 'idle' as const, startedAt: null } : s);
+    saveSchedulesLocal(next);
+    await syncSchedulesToServer(next);
+    firedCountdownIds.current.delete(scheduleId);
+    refreshShuffleSchedules();
+    setRunStatus({ type: 'info', text: 'Schedule wait cancelled' });
+  };
+
+  const pendingShuffleSchedules = useMemo(
+    () => shuffleSchedules.filter(s => s.status === 'countdown' || s.status === 'scheduled'),
+    [shuffleSchedules],
+  );
 
   const filteredProfiles = useMemo(() => {
     const q = profileSearch.trim().toLowerCase();
@@ -767,7 +1241,9 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
         <div className="flex items-center justify-between mb-4">
           <div>
             <h1 className="text-2xl font-bold text-white">Video Shuffle</h1>
-            <p className="text-gray-500 text-sm mt-0.5">Unique videos per profile · history from server (14 days) · watched mark hota hai jab video actually complete ho.</p>
+            <p className="text-gray-500 text-sm mt-0.5">
+              Unique ya same video mode · watch % {settings.watchTimeMin}–{settings.watchTimeMax} · quality {settings.videoQuality}
+            </p>
             <button type="button" onClick={() => { void refreshShuffleHistoryFromBackend(); }}
               className="mt-1 text-xs text-purple-400 hover:text-purple-300 underline-offset-2 hover:underline">
               Refresh server watch history
@@ -809,17 +1285,21 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
           </div>
         </div>
 
+        {runStatus && (
+          <div className={`mb-3 flex items-center justify-between gap-2 text-xs rounded-lg px-3 py-2 border ${
+            runStatus.type === 'error' ? 'text-red-300 bg-red-900/20 border-red-700/30'
+            : runStatus.type === 'warn' ? 'text-amber-300 bg-amber-900/20 border-amber-700/30'
+            : runStatus.type === 'success' ? 'text-green-300 bg-green-900/20 border-green-700/30'
+            : 'text-blue-300 bg-blue-900/20 border-blue-700/30'
+          }`}>
+            <span>{runStatus.text}</span>
+            <button type="button" onClick={() => setRunStatus(null)} className="text-gray-400 hover:text-white">✕</button>
+          </div>
+        )}
         {concurrency && (
           <div className="mb-3 flex items-center gap-2 text-xs text-amber-300/90 bg-amber-900/20 border border-amber-700/30 rounded-lg px-3 py-2">
             <AlertTriangle size={14} />
             Concurrency: {concurrency.running}/{concurrency.limit} running · {concurrency.available} slots free
-          </div>
-        )}
-        {running && runProgress && (
-          <div className="mb-3 text-xs text-green-400 bg-green-900/20 border border-green-700/30 rounded-lg px-3 py-2">
-            Progress: {runProgress.done}/{runProgress.total} done
-            {runProgress.failed > 0 && ` · ${runProgress.failed} failed`}
-            <span className="text-gray-500 ml-2">— history updates per completed video</span>
           </div>
         )}
 
@@ -833,9 +1313,11 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
             <div className="text-xl font-bold text-green-400">{totalAssigned}</div>
             <div className="text-xs text-gray-500">Assigned</div>
           </div>
-          <div className={`border rounded-xl p-3 ${hasOverlap ? 'border-red-700/30 bg-red-900/10' : 'border-green-700/30 bg-green-900/10'}`}>
-            <div className={`text-xl font-bold ${hasOverlap ? 'text-red-400' : 'text-green-400'}`}>{hasOverlap ? '⚠️ Overlap' : '✅ Clean'}</div>
-            <div className="text-xs text-gray-500">Overlap Status</div>
+          <div className={`border rounded-xl p-3 ${sameVideoActive ? 'border-blue-700/30 bg-blue-900/10' : hasOverlap ? 'border-red-700/30 bg-red-900/10' : 'border-green-700/30 bg-green-900/10'}`}>
+            <div className={`text-xl font-bold ${sameVideoActive ? 'text-blue-400' : hasOverlap ? 'text-red-400' : 'text-green-400'}`}>
+              {sameVideoActive ? '🔗 Same' : hasOverlap ? '⚠️ Overlap' : '✅ Unique'}
+            </div>
+            <div className="text-xs text-gray-500">{sameVideoActive ? 'Same Video Mode' : 'Assignment Mode'}</div>
           </div>
           <div className="border border-purple-700/30 bg-purple-900/10 rounded-xl p-3">
             <div className="text-xl font-bold text-purple-400">{profiles.length}</div>
@@ -845,16 +1327,386 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 space-y-6">
-        {/* Live Progress Panel */}
-        <LiveProgressPanel compact />
+        {/* Live Progress — filtered to current shuffle run only (no overlap with scheduler) */}
+        <LiveProgressPanel
+          compact
+          profiles={profiles}
+          filterProfileIds={
+            recycleStatus?.enabled
+              ? recycleStatus.slots.filter(s => s.enabled).map(s => s.currentProfileId)
+              : running && activeRunProfileIds.length > 0
+                ? activeRunProfileIds
+                : undefined
+          }
+          runLabel={recycleStatus?.enabled ? '24/7 Loop Progress' : running ? 'Shuffle Run Progress' : undefined}
+          hideWhenIdle={!running && !recycleStatus?.enabled}
+          showRecycleControls
+          onStartRecycle={handleStartLoop}
+          onStopRecycle={handleStopLoop}
+          recycleLoopBusy={loopBusy}
+          canStartRecycle={loopProfileIds.length > 0 && channelConfigs.length > 0}
+          onRefreshProfiles={onRefreshProfiles}
+        />
 
-        {/* Pool Exhausted Notices */}
+        {/* 24/7 Auto Loop */}
+        <div className="bg-gray-900 border border-emerald-800/50 rounded-2xl p-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div>
+              <h2 className="text-white font-semibold flex items-center gap-2">
+                <RefreshCw size={18} className="text-emerald-400" />
+                24/7 Auto Loop
+              </h2>
+              <p className="text-xs text-gray-500 mt-1">
+                Task complete → cooldown → delete → recreate → shuffle → run (automatic, no manual step)
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {recycleStatus?.enabled ? (
+                <span className="text-xs text-emerald-400 font-medium">● RUNNING · {recycleStatus.activeSlots} slot(s)</span>
+              ) : (
+                <span className="text-xs text-gray-500">● Stopped</span>
+              )}
+              {recycleStatus?.enabled ? (
+                <button type="button" disabled={loopBusy} onClick={() => void handleStopLoop()}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-red-700 hover:bg-red-600 disabled:opacity-50 text-white text-sm font-bold">
+                  <Square size={14} /> Stop 24/7
+                </button>
+              ) : (
+                <button type="button" disabled={loopBusy || loopProfileIds.length === 0}
+                  onClick={() => void handleStartLoop()}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-sm font-bold">
+                  <Play size={14} /> Start 24/7
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Cooldown min (minutes)</label>
+              <input type="number" min={1} max={1440} value={cooldownMin} disabled={!!recycleStatus?.enabled}
+                onChange={(e) => setCooldownMin(Math.max(1, Number(e.target.value) || 1))}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm disabled:opacity-50" />
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Cooldown max (minutes)</label>
+              <input type="number" min={1} max={1440} value={cooldownMax} disabled={!!recycleStatus?.enabled}
+                onChange={(e) => setCooldownMax(Math.max(cooldownMin, Number(e.target.value) || cooldownMin))}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm disabled:opacity-50" />
+            </div>
+            <div className="flex items-end">
+              <p className="text-xs text-gray-500 pb-2">
+                Har cycle ke baad random wait ({cooldownMin}–{cooldownMax} min), phir recreate + naya shuffle
+              </p>
+            </div>
+          </div>
+
+          <div className="mb-4">
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-xs text-gray-400">Profiles in loop ({loopProfileIds.length} selected)</label>
+              {!recycleStatus?.enabled && (
+                <div className="flex gap-2">
+                  <button type="button" className="text-xs text-emerald-400 hover:text-emerald-300"
+                    onClick={() => setLoopProfileIds(profiles.map(p => p.id))}>Select all</button>
+                  <button type="button" className="text-xs text-gray-500 hover:text-gray-300"
+                    onClick={() => setLoopProfileIds([])}>Clear</button>
+                  {selectedProfileIds.length > 0 && (
+                    <button type="button" className="text-xs text-blue-400 hover:text-blue-300"
+                      onClick={() => setLoopProfileIds([...selectedProfileIds])}>Use shuffle selection</button>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
+              {profiles.map(p => {
+                const on = loopProfileIds.includes(p.id);
+                const slot = recycleStatus?.slots.find(s => s.currentProfileId === p.id || s.profileName === p.name);
+                return (
+                  <button key={p.id} type="button" disabled={!!recycleStatus?.enabled}
+                    onClick={() => toggleLoopProfile(p.id)}
+                    className={`px-2.5 py-1 rounded-lg text-xs border transition-all disabled:cursor-default ${
+                      slot?.status === 'running' ? 'border-green-500 bg-green-900/30 text-green-300'
+                        : slot?.status === 'cooldown' ? 'border-amber-500 bg-amber-900/20 text-amber-300'
+                        : slot?.status === 'recreating' ? 'border-purple-500 bg-purple-900/20 text-purple-300'
+                        : on ? 'border-emerald-600 bg-emerald-900/20 text-emerald-300'
+                        : 'border-gray-700 bg-gray-800 text-gray-500'
+                    }`}>
+                    {p.name}
+                    {slot ? ` · ${recycleStatusLabel(slot.status)}` : on ? ' ✓' : ''}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {recycleStatus?.enabled && recycleStatus.slots.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-gray-500 border-b border-gray-800">
+                    <th className="text-left py-2 pr-2">Profile</th>
+                    <th className="text-left py-2 pr-2">Status</th>
+                    <th className="text-left py-2 pr-2">Cycle</th>
+                    <th className="text-left py-2 pr-2">Next</th>
+                    <th className="text-left py-2">Videos</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recycleStatus.slots.filter(s => s.enabled).map(s => (
+                    <tr key={s.slotId} className="border-b border-gray-800/50 text-gray-300">
+                      <td className="py-2 pr-2 font-medium text-white">{s.profileName}</td>
+                      <td className="py-2 pr-2">{recycleStatusLabel(s.status)}</td>
+                      <td className="py-2 pr-2">#{s.cycleCount}</td>
+                      <td className="py-2 pr-2">
+                        {s.status === 'cooldown' ? formatCooldownRemaining(s.cooldownUntil, scheduleNow) : '—'}
+                      </td>
+                      <td className="py-2">{s.videoCount || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {recycleStatus.slots.some(s => s.lastError) && (
+                <p className="text-xs text-red-400 mt-2">
+                  Error: {recycleStatus.slots.filter(s => s.lastError).map(s => `${s.profileName}: ${s.lastError}`).join(' · ')}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
         {poolExhaustedNotice.length > 0 && (
           <div className="bg-yellow-900/20 border border-yellow-700/30 rounded-xl p-3 space-y-1">
-            <div className="flex items-center gap-2 text-yellow-400 text-sm font-medium"><AlertTriangle size={14} /> Pool Exhausted Notices:</div>
-            {poolExhaustedNotice.map((n, i) => <p key={i} className="text-xs text-yellow-300/70 ml-5">{n}</p>)}
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-yellow-400 text-sm font-medium">
+                <AlertTriangle size={14} /> Shuffle notice ({poolExhaustedNotice.length})
+              </div>
+              <button type="button" onClick={() => setPoolExhaustedNotice([])} className="text-xs text-yellow-500 hover:text-yellow-300">Dismiss</button>
+            </div>
+            {poolExhaustedNotice.slice(0, 5).map((n, i) => <p key={i} className="text-xs text-yellow-300/70 ml-5">{n}</p>)}
+            {poolExhaustedNotice.length > 5 && <p className="text-xs text-yellow-500/60 ml-5">+{poolExhaustedNotice.length - 5} more</p>}
           </div>
         )}
+
+        {/* Playback & Assignment Mode */}
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+          <h2 className="text-white font-semibold mb-4">Playback & Assignment</h2>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+            <div>
+              <label className="text-xs text-gray-400 block mb-2">Video assignment mode</label>
+              <div className="flex gap-2">
+                <button type="button"
+                  onClick={() => setSettings(s => normalizeShuffleSettings({ ...s, assignmentMode: 'unique' }))}
+                  className={`flex-1 px-3 py-2 rounded-xl border text-xs font-medium transition-all ${settings.assignmentMode === 'unique' ? 'border-purple-500 bg-purple-900/30 text-purple-300' : 'border-gray-700 bg-gray-800 text-gray-400'}`}>
+                  Unique per profile
+                </button>
+                <button type="button"
+                  onClick={() => setSettings(s => normalizeShuffleSettings({ ...s, assignmentMode: 'same-all' }))}
+                  className={`flex-1 px-3 py-2 rounded-xl border text-xs font-medium transition-all ${settings.assignmentMode === 'same-all' ? 'border-blue-500 bg-blue-900/30 text-blue-300' : 'border-gray-700 bg-gray-800 text-gray-400'}`}>
+                  Same video — all profiles
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                {settings.assignmentMode === 'same-all'
+                  ? `Har enabled channel se 1 video — sab profiles par same (${channelConfigs.length} channel = ${channelConfigs.length} video). Har profile ka watch % alag.`
+                  : 'Har profile ko alag video — same run me overlap nahi.'}
+              </p>
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-2">Watch % range (har profile alag %)</label>
+              <div className="flex items-center gap-3">
+                <input type="number" min={1} max={100} value={settings.watchTimeMin}
+                  onChange={(e) => setSettings(s => ({ ...s, ...clampWatchRange(Number(e.target.value), s.watchTimeMax) }))}
+                  className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-white text-sm" />
+                <span className="text-gray-500">to</span>
+                <input type="number" min={1} max={100} value={settings.watchTimeMax}
+                  onChange={(e) => setSettings(s => ({ ...s, ...clampWatchRange(s.watchTimeMin, Number(e.target.value)) }))}
+                  className="w-20 bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-white text-sm" />
+                <span className="text-xs text-gray-500">% of video length</span>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">Example: 80–100% — Profile A 87%, Profile B 94% (alag timing)</p>
+            </div>
+            <div className="lg:col-span-2">
+              <label className="text-xs text-gray-400 block mb-2">Video quality (agent 3-pass autoplay OFF verify karega)</label>
+              <div className="flex flex-wrap gap-2">
+                {QUALITY_OPTIONS.map(q => (
+                  <button key={q} type="button"
+                    onClick={() => setSettings(s => ({ ...s, videoQuality: q }))}
+                    className={`px-3 py-1.5 rounded-lg border text-xs transition-all ${settings.videoQuality === q ? 'border-purple-500 bg-purple-900/30 text-purple-300' : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'}`}>
+                    {q}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="lg:col-span-2 border-t border-gray-800 pt-4">
+              <label className="text-xs text-gray-400 block mb-2 font-medium text-amber-300/90">Ads Settings</label>
+              <div className="grid sm:grid-cols-3 gap-4">
+                <label className="flex items-center gap-2 text-sm text-gray-400">
+                  <input type="checkbox" checked={settings.adSkipEnabled}
+                    onChange={e => setSettings(s => ({ ...s, adSkipEnabled: e.target.checked }))}
+                    className="rounded border-gray-600" />
+                  Skip ads enabled
+                </label>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Pre-roll: skip after (seconds)</label>
+                  <input type="number" min={0} max={120} value={settings.adSkipAfterSec}
+                    onChange={e => setSettings(s => ({ ...s, adSkipAfterSec: Math.max(0, Number(e.target.value) || 0) }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-white text-sm" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Mid-roll: wait before skip (seconds)</label>
+                  <input type="number" min={0} max={120} value={settings.midRollAdWaitSec}
+                    onChange={e => setSettings(s => ({ ...s, midRollAdWaitSec: Math.max(0, Number(e.target.value) || 0) }))}
+                    className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-1.5 text-white text-sm" />
+                </div>
+              </div>
+              <p className="text-xs text-gray-600 mt-2">Pre-roll = video se pehle ad · Mid-roll = beech me ad · Skip button aane ke baad itni der wait</p>
+            </div>
+            {settings.assignmentMode === 'same-all' && channelConfigs.length > 0 && (
+              <div className="lg:col-span-2 border-t border-gray-800 pt-4">
+                <label className="text-xs text-gray-400 block mb-3">Same mode — video select karo (har channel ke liye)</label>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {channelConfigs.map(config => {
+                    const vids = getVideos(config.channelId, 'enabled');
+                    const current = sameModePicks[config.channelId] || 'random';
+                    return (
+                      <div key={config.channelId} className="bg-gray-800 rounded-xl p-3 border border-gray-700">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-white text-xs font-medium">{config.channelName}</span>
+                          <span className="text-gray-500 text-xs">{vids.length} videos</span>
+                        </div>
+                        <select
+                          value={current}
+                          onChange={(e) => setSameModePick(config.channelId, e.target.value)}
+                          className="w-full bg-gray-900 border border-gray-700 rounded-lg px-2 py-1.5 text-xs text-white"
+                        >
+                          <option value="random">🎲 Random shuffle</option>
+                          {vids.map(v => (
+                            <option key={v.video_id} value={v.video_id}>{v.title}</option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Save as Schedule */}
+        <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <div>
+              <h2 className="text-white font-semibold flex items-center gap-2">
+                <Calendar size={16} className="text-purple-400" /> Save as Schedule
+              </h2>
+              <p className="text-xs text-gray-500 mt-1">Scheduler page par bhi dikhega · countdown min 1 minute</p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Schedule name</label>
+              <input
+                value={scheduleDraft.name}
+                onChange={(e) => setScheduleDraft(d => ({ ...d, name: e.target.value }))}
+                placeholder={`Shuffle ${new Date().toLocaleDateString()}`}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Run mode</label>
+              <div className="flex gap-2">
+                {(['manual', 'countdown', 'scheduled'] as const).map(mode => (
+                  <button key={mode} type="button"
+                    onClick={() => setScheduleDraft(d => ({ ...d, runMode: mode }))}
+                    className={`flex-1 px-2 py-2 rounded-lg border text-xs capitalize transition-all ${scheduleDraft.runMode === mode ? 'border-purple-500 bg-purple-900/30 text-purple-300' : 'border-gray-700 bg-gray-800 text-gray-400'}`}>
+                    {mode === 'manual' ? 'Manual' : mode === 'countdown' ? 'Countdown' : 'Fixed time'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {scheduleDraft.runMode === 'countdown' && (
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Countdown (minutes, min 1)</label>
+                <input type="number" min={1} max={10080} value={scheduleDraft.countdownMinutes}
+                  onChange={(e) => setScheduleDraft(d => ({ ...d, countdownMinutes: clampCountdownMinutes(Number(e.target.value)) }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" />
+              </div>
+            )}
+            {scheduleDraft.runMode === 'scheduled' && (
+              <div>
+                <label className="text-xs text-gray-400 block mb-1">Fixed run time</label>
+                <input type="datetime-local"
+                  value={scheduleDraft.scheduledTime ? new Date(scheduleDraft.scheduledTime).toISOString().slice(0, 16) : ''}
+                  onChange={(e) => setScheduleDraft(d => ({ ...d, scheduledTime: new Date(e.target.value).getTime() }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white" />
+              </div>
+            )}
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Profile delay (sec)</label>
+              <div className="flex gap-2">
+                <input type="number" min={0} value={scheduleDraft.profileDelayMin}
+                  onChange={(e) => setScheduleDraft(d => ({ ...d, profileDelayMin: Number(e.target.value) }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm text-white" />
+                <span className="text-gray-500 self-center">–</span>
+                <input type="number" min={0} value={scheduleDraft.profileDelayMax}
+                  onChange={(e) => setScheduleDraft(d => ({ ...d, profileDelayMax: Number(e.target.value) }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm text-white" />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs text-gray-400 block mb-1">Video delay (sec)</label>
+              <div className="flex gap-2">
+                <input type="number" min={0} value={scheduleDraft.tabDelayMin}
+                  onChange={(e) => setScheduleDraft(d => ({ ...d, tabDelayMin: Number(e.target.value) }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm text-white" />
+                <span className="text-gray-500 self-center">–</span>
+                <input type="number" min={0} value={scheduleDraft.tabDelayMax}
+                  onChange={(e) => setScheduleDraft(d => ({ ...d, tabDelayMax: Number(e.target.value) }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm text-white" />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2 mb-4">
+            <button type="button" onClick={() => void handleSaveSchedule(false)}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-700 hover:bg-purple-600 text-white text-sm font-medium">
+              <Save size={14} /> Save Schedule
+            </button>
+            <button type="button" onClick={() => void handleSaveSchedule(true)}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-yellow-700 hover:bg-yellow-600 text-white text-sm font-medium">
+              <Timer size={14} /> Save + Start Countdown
+            </button>
+          </div>
+
+          {pendingShuffleSchedules.length > 0 && (
+            <div className="border-t border-gray-800 pt-4 space-y-2">
+              <p className="text-xs text-gray-400 font-medium">Waiting schedules (from shuffle)</p>
+              {pendingShuffleSchedules.map(s => {
+                const cd = countdownRemaining(s, scheduleNow);
+                return (
+                  <div key={s.id} className="flex items-center justify-between gap-3 bg-gray-800 rounded-xl px-3 py-2 border border-gray-700">
+                    <div className="min-w-0">
+                      <p className="text-white text-xs font-medium truncate">{s.name}</p>
+                      <p className="text-gray-500 text-xs">
+                        {s.status === 'countdown' && (
+                          <span className="text-yellow-400 font-mono">{formatCountdown(cd)}</span>
+                        )}
+                        {s.status === 'scheduled' && (
+                          <span className="text-purple-400">{new Date(s.scheduledTime).toLocaleString()}</span>
+                        )}
+                        {' · '}{(s.selectedProfiles?.length ?? 0)} profiles
+                      </p>
+                    </div>
+                    <button type="button" onClick={() => void handleCancelScheduleWait(s.id)}
+                      className="text-xs text-gray-400 hover:text-red-400 flex-shrink-0">Cancel</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
         {/* Profile Selection */}
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
@@ -966,7 +1818,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
                         className="bg-green-700 hover:bg-green-600 text-white px-2 py-1 rounded text-xs transition-all">
                         <Play size={10} className="inline" /> Run
                       </button>
-                      <button type="button" onClick={() => { if (window.confirm('Reshuffle this profile?')) reshuffleSingle(a.profileId); }}
+                      <button type="button" onClick={() => reshuffleSingle(a.profileId)}
                         className="bg-purple-800 hover:bg-purple-700 text-white px-2 py-1 rounded text-xs">
                         <Shuffle size={10} className="inline" />
                       </button>
@@ -1002,16 +1854,20 @@ export default function VideoShufflePage({ profiles, channels, getVideos }: Vide
       </div>
 
       {/* Detail Modal */}
-      {detailProfile && (
+      {detailProfile && (() => {
+        const detailAssignment = assignments.find(a => a.profileId === detailProfile);
+        if (!detailAssignment) return null;
+        return (
         <DetailModal
-          assignment={assignments.find(a => a.profileId === detailProfile)!}
+          assignment={detailAssignment}
           profile={profiles.find(p => p.id === detailProfile)}
           watchHistory={watchHistory.filter(h => h.profileId === detailProfile)}
           serverNormSet={new Set((serverHist[detailProfile] || []).map(r => r.norm))}
           mergedWatchedCount={watchedCountsByProfile[detailProfile] ?? watchHistory.filter(h => h.profileId === detailProfile).length}
           onRemove={(index) => removeVideoFromAssignment(detailProfile, index)}
           onClose={() => setDetailProfile(null)} />
-      )}
+        );
+      })()}
     </div>
   );
 }

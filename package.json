@@ -9,7 +9,10 @@
   "scripts": {
     "dev": "vite --host",
     "server": "node server/index.cjs",
+    "watchdog": "node server/watchdog.cjs",
+    "test:youtube-ui-smoke": "node server/scripts/youtube-ui-smoke.cjs",
     "test:traffic-qa": "node server/scripts/e2e-traffic-qa.cjs",
+    "test:antidetect": "node server/scripts/audit-antidetect-4.cjs",
     "start": "concurrently \"npm run dev\" \"npm run server\"",
     "build": "vite build",
     "preview": "vite preview",

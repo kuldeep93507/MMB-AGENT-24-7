@@ -1,0 +1,1612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MMB Agent Sites Tool — Complete Documentation</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  :root {
+    --blue:   #2563eb;
+    --green:  #16a34a;
+    --purple: #7c3aed;
+    --orange: #ea580c;
+    --red:    #dc2626;
+    --gray:   #6b7280;
+    --dark:   #111827;
+    --light:  #f9fafb;
+    --border: #e5e7eb;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #1f2937;
+    background: #fff;
+  }
+
+  /* ─── COVER PAGE ─── */
+  .cover {
+    height: 100vh;
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 50%, #0f172a 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: #fff;
+    page-break-after: always;
+    position: relative;
+    overflow: hidden;
+  }
+  .cover::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at 30% 40%, rgba(37,99,235,0.25) 0%, transparent 60%),
+                radial-gradient(ellipse at 70% 60%, rgba(124,58,237,0.2) 0%, transparent 60%);
+  }
+  .cover-inner { position: relative; z-index: 1; padding: 40px; }
+  .cover-badge {
+    display: inline-block;
+    background: rgba(37,99,235,0.3);
+    border: 1px solid rgba(96,165,250,0.5);
+    color: #93c5fd;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    padding: 6px 18px;
+    border-radius: 100px;
+    margin-bottom: 28px;
+  }
+  .cover h1 {
+    font-size: 52px;
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 16px;
+    background: linear-gradient(135deg, #fff 0%, #93c5fd 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .cover-sub {
+    font-size: 18px;
+    color: #94a3b8;
+    margin-bottom: 48px;
+    font-weight: 300;
+  }
+  .cover-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    max-width: 600px;
+    margin: 0 auto 48px;
+  }
+  .cover-chip {
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 14px 12px;
+    font-size: 11px;
+    color: #cbd5e1;
+  }
+  .cover-chip strong { display: block; font-size: 20px; color: #fff; margin-bottom: 4px; }
+  .cover-footer {
+    font-size: 11px;
+    color: #475569;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    padding-top: 24px;
+    margin-top: 24px;
+  }
+
+  /* ─── TOC ─── */
+  .toc-page {
+    padding: 60px 80px;
+    page-break-after: always;
+    min-height: 100vh;
+  }
+  .toc-title { font-size: 28px; font-weight: 700; color: var(--dark); margin-bottom: 8px; }
+  .toc-sub   { color: var(--gray); font-size: 12px; margin-bottom: 36px; }
+  .toc-section { margin-bottom: 6px; }
+  .toc-section a {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #374151;
+    text-decoration: none;
+    font-size: 13px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    transition: background 0.15s;
+  }
+  .toc-section a:hover { background: #f3f4f6; }
+  .toc-num { font-weight: 700; color: var(--blue); min-width: 28px; font-size: 12px; }
+  .toc-dots { flex: 1; border-bottom: 1px dotted #d1d5db; margin: 0 8px; }
+  .toc-pg { color: var(--gray); font-size: 11px; }
+  .toc-group { font-size: 10px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #9ca3af; margin: 20px 0 8px; padding-left: 12px; }
+
+  /* ─── CONTENT PAGES ─── */
+  .chapter {
+    padding: 60px 80px;
+    page-break-before: always;
+    min-height: 100vh;
+  }
+  .chapter-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 32px;
+    padding-bottom: 24px;
+    border-bottom: 2px solid var(--border);
+  }
+  .chapter-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+  }
+  .icon-blue   { background: #dbeafe; }
+  .icon-green  { background: #dcfce7; }
+  .icon-purple { background: #ede9fe; }
+  .icon-orange { background: #ffedd5; }
+  .icon-red    { background: #fee2e2; }
+  .icon-gray   { background: #f3f4f6; }
+  .icon-teal   { background: #ccfbf1; }
+  .chapter-title { font-size: 28px; font-weight: 700; color: var(--dark); line-height: 1.2; }
+  .chapter-desc  { color: var(--gray); font-size: 13px; margin-top: 6px; }
+  .chapter-num   { font-size: 11px; font-weight: 700; color: var(--blue); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+
+  h2 { font-size: 17px; font-weight: 700; color: var(--dark); margin: 28px 0 12px; }
+  h3 { font-size: 14px; font-weight: 600; color: #374151; margin: 20px 0 8px; }
+  p  { margin-bottom: 12px; color: #374151; }
+
+  /* ─── COMPONENTS ─── */
+  .info-box {
+    border-radius: 12px;
+    padding: 16px 20px;
+    margin: 16px 0;
+    border-left: 4px solid;
+    font-size: 12.5px;
+  }
+  .info-box.blue   { background: #eff6ff; border-color: var(--blue);   color: #1e3a8a; }
+  .info-box.green  { background: #f0fdf4; border-color: var(--green);  color: #14532d; }
+  .info-box.purple { background: #f5f3ff; border-color: var(--purple); color: #4c1d95; }
+  .info-box.orange { background: #fff7ed; border-color: var(--orange); color: #7c2d12; }
+  .info-box.red    { background: #fef2f2; border-color: var(--red);    color: #7f1d1d; }
+  .info-box-title  { font-weight: 700; margin-bottom: 6px; font-size: 12px; }
+
+  .flow {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 20px 0;
+    position: relative;
+  }
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    position: relative;
+    padding-bottom: 16px;
+  }
+  .flow-step:last-child { padding-bottom: 0; }
+  .flow-line {
+    position: absolute;
+    left: 19px;
+    top: 40px;
+    bottom: 0;
+    width: 2px;
+    background: #e5e7eb;
+  }
+  .flow-step:last-child .flow-line { display: none; }
+  .flow-num {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--blue);
+    color: #fff;
+    font-weight: 700;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
+  }
+  .flow-body { flex: 1; padding-top: 8px; }
+  .flow-body strong { font-size: 14px; display: block; margin-bottom: 4px; color: var(--dark); }
+  .flow-body span   { font-size: 12px; color: var(--gray); }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin: 16px 0; }
+
+  .card {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .card-title { font-weight: 700; font-size: 13px; color: var(--dark); margin-bottom: 6px; }
+  .card-sub   { font-size: 11.5px; color: var(--gray); line-height: 1.6; }
+  .card-tag   { display: inline-block; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 100px; margin-bottom: 8px; }
+  .tag-blue   { background: #dbeafe; color: #1d4ed8; }
+  .tag-green  { background: #dcfce7; color: #15803d; }
+  .tag-purple { background: #ede9fe; color: #6d28d9; }
+  .tag-orange { background: #ffedd5; color: #c2410c; }
+  .tag-red    { background: #fee2e2; color: #b91c1c; }
+  .tag-gray   { background: #f3f4f6; color: #4b5563; }
+  .tag-teal   { background: #ccfbf1; color: #0f766e; }
+
+  code, .mono {
+    font-family: 'JetBrains Mono', monospace;
+    background: #f3f4f6;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11.5px;
+    color: #1f2937;
+  }
+  .code-block {
+    background: #1e293b;
+    color: #e2e8f0;
+    border-radius: 12px;
+    padding: 16px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    line-height: 1.8;
+    margin: 14px 0;
+    overflow: hidden;
+  }
+  .code-block .comment { color: #64748b; }
+  .code-block .key     { color: #7dd3fc; }
+  .code-block .val     { color: #86efac; }
+  .code-block .str     { color: #fbbf24; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 12px;
+  }
+  th {
+    background: #f9fafb;
+    font-weight: 600;
+    color: #374151;
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 2px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  td { padding: 9px 14px; border-bottom: 1px solid #f3f4f6; color: #374151; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafafa; }
+
+  .persona-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 14px 0;
+  }
+  .persona-row { display: flex; align-items: center; gap: 12px; }
+  .persona-name { font-weight: 600; font-size: 12px; min-width: 90px; color: var(--dark); }
+  .bar-track { flex: 1; height: 8px; background: #f3f4f6; border-radius: 100px; overflow: hidden; }
+  .bar-fill  { height: 100%; border-radius: 100px; }
+  .persona-desc { font-size: 11px; color: var(--gray); min-width: 180px; }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10.5px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 100px;
+    margin: 2px;
+  }
+
+  .highlight {
+    background: linear-gradient(135deg, #1e3a5f, #312e81);
+    color: #fff;
+    border-radius: 16px;
+    padding: 24px 28px;
+    margin: 20px 0;
+  }
+  .highlight h3  { color: #93c5fd; margin-top: 0; }
+  .highlight p   { color: #cbd5e1; font-size: 12.5px; }
+  .highlight code { background: rgba(255,255,255,0.1); color: #a5f3fc; }
+
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+  .dot-green  { background: #22c55e; }
+  .dot-blue   { background: #3b82f6; }
+  .dot-yellow { background: #eab308; }
+  .dot-red    { background: #ef4444; }
+  .dot-gray   { background: #9ca3af; }
+
+  ul { list-style: none; padding: 0; margin: 12px 0; }
+  ul li { padding: 5px 0 5px 20px; position: relative; font-size: 12.5px; color: #374151; }
+  ul li::before { content: '→'; position: absolute; left: 0; color: var(--blue); font-weight: 700; }
+
+  ol { padding-left: 20px; margin: 12px 0; }
+  ol li { padding: 4px 0; font-size: 12.5px; color: #374151; }
+
+  hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+  .divider { height: 1px; background: linear-gradient(90deg, var(--border), transparent); margin: 28px 0; }
+
+  @media print {
+    body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .chapter { page-break-before: always; }
+    .cover   { page-break-after: always; }
+    .toc-page { page-break-after: always; }
+    a { color: inherit; text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════
+     COVER PAGE
+══════════════════════════════════════════════ -->
+<div class="cover">
+  <div class="cover-inner">
+    <div class="cover-badge">Technical Documentation</div>
+    <h1>MMB Agent Sites</h1>
+    <div class="cover-sub">Complete Tool Reference — Profile Start to Stop</div>
+
+    <div class="cover-grid">
+      <div class="cover-chip"><strong>3</strong>Browser Providers</div>
+      <div class="cover-chip"><strong>5</strong>AI Personas</div>
+      <div class="cover-chip"><strong>8</strong>Traffic Sources</div>
+      <div class="cover-chip"><strong>Claude</strong>AI Brain</div>
+      <div class="cover-chip"><strong>CDP</strong>Playwright</div>
+      <div class="cover-chip"><strong>Real-time</strong>Analytics</div>
+    </div>
+
+    <div class="cover-footer">
+      MMB-AGENT-24-7 &nbsp;·&nbsp; Backend: port 3200 &nbsp;·&nbsp; Frontend: port 5200<br/>
+      Path: E:\2026-5-17\MMB AGENT 247\MMB AGENT 247\MMB-AGENT-24-7-main\MMB AGENT SITES\
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     TABLE OF CONTENTS
+══════════════════════════════════════════════ -->
+<div class="toc-page">
+  <div class="toc-title">Table of Contents</div>
+  <div class="toc-sub">Click any section to jump directly to it</div>
+
+  <div class="toc-group">Foundations</div>
+  <div class="toc-section"><a href="#ch1"><span class="toc-num">01</span> Tool Overview & Architecture<span class="toc-dots"></span><span class="toc-pg">3</span></a></div>
+  <div class="toc-section"><a href="#ch2"><span class="toc-num">02</span> Installation & Setup<span class="toc-dots"></span><span class="toc-pg">4</span></a></div>
+  <div class="toc-section"><a href="#ch3"><span class="toc-num">03</span> Settings & Configuration<span class="toc-dots"></span><span class="toc-pg">5</span></a></div>
+
+  <div class="toc-group">Profile Lifecycle</div>
+  <div class="toc-section"><a href="#ch4"><span class="toc-num">04</span> Profile Start — Step by Step<span class="toc-dots"></span><span class="toc-pg">6</span></a></div>
+  <div class="toc-section"><a href="#ch5"><span class="toc-num">05</span> Browser Provider Integration<span class="toc-dots"></span><span class="toc-pg">7</span></a></div>
+  <div class="toc-section"><a href="#ch6"><span class="toc-num">06</span> CDP Connection & Agent Init<span class="toc-dots"></span><span class="toc-pg">8</span></a></div>
+
+  <div class="toc-group">Automation Engine</div>
+  <div class="toc-section"><a href="#ch7"><span class="toc-num">07</span> Persona System — 5 Personality Types<span class="toc-dots"></span><span class="toc-pg">9</span></a></div>
+  <div class="toc-section"><a href="#ch8"><span class="toc-num">08</span> Traffic Source Routing<span class="toc-dots"></span><span class="toc-pg">10</span></a></div>
+  <div class="toc-section"><a href="#ch9"><span class="toc-num">09</span> Article Reading — Scroll & Dwell<span class="toc-dots"></span><span class="toc-pg">11</span></a></div>
+  <div class="toc-section"><a href="#ch10"><span class="toc-num">10</span> Human Simulation Details<span class="toc-dots"></span><span class="toc-pg">12</span></a></div>
+
+  <div class="toc-group">AI & Intelligence</div>
+  <div class="toc-section"><a href="#ch11"><span class="toc-num">11</span> AI Brain — Claude Integration<span class="toc-dots"></span><span class="toc-pg">13</span></a></div>
+
+  <div class="toc-group">Scheduling & Backlinks</div>
+  <div class="toc-section"><a href="#ch12"><span class="toc-num">12</span> Scheduler — Cron & Article Shuffle<span class="toc-dots"></span><span class="toc-pg">14</span></a></div>
+  <div class="toc-section"><a href="#ch13"><span class="toc-num">13</span> Backlink Builder<span class="toc-dots"></span><span class="toc-pg">15</span></a></div>
+
+  <div class="toc-group">Monitoring & Control</div>
+  <div class="toc-section"><a href="#ch14"><span class="toc-num">14</span> Analytics & Read History<span class="toc-dots"></span><span class="toc-pg">16</span></a></div>
+  <div class="toc-section"><a href="#ch15"><span class="toc-num">15</span> Profile Stop — Step by Step<span class="toc-dots"></span><span class="toc-pg">17</span></a></div>
+  <div class="toc-section"><a href="#ch16"><span class="toc-num">16</span> API Reference<span class="toc-dots"></span><span class="toc-pg">18</span></a></div>
+  <div class="toc-section"><a href="#ch17"><span class="toc-num">17</span> Troubleshooting<span class="toc-dots"></span><span class="toc-pg">19</span></a></div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 1: OVERVIEW
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch1">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-blue">🏗️</div>
+    <div>
+      <div class="chapter-num">Chapter 01</div>
+      <div class="chapter-title">Tool Overview & Architecture</div>
+      <div class="chapter-desc">MMB Agent Sites ka poora system ek nazar mein</div>
+    </div>
+  </div>
+
+  <p><strong>MMB Agent Sites Tool</strong> ek automated web-traffic generation system hai jo antidetect browser profiles ke through real articles padhta hai — Google search se leke article scroll tak — bilkul ek real insaan ki tarah. Iska main purpose website ke AdSense/ad revenue ke liye authentic-looking traffic generate karna hai.</p>
+
+  <h2>System Architecture</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-tag tag-blue">Frontend</div>
+      <div class="card-title">React UI — Port 5200</div>
+      <div class="card-sub">Vite + React + Tailwind CSS. Dashboard, Profiles, Scheduler, Analytics, Settings — sab pages yahan hain. Browser mein <code>http://localhost:5200</code> pe khulta hai.</div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-green">Backend</div>
+      <div class="card-title">Node.js Server — Port 3200</div>
+      <div class="card-sub">Express.js server jo saare kaam karta hai: profile launch, CDP automation, analytics save, scheduler run, backlink build. File: <code>MMB AGENT SITES/server/index.cjs</code></div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-purple">AI Brain</div>
+      <div class="card-title">Claude Haiku (Anthropic)</div>
+      <div class="card-sub">Har profile ka apna AIBrain instance hota hai. Ye search query, read depth, aur next action decide karta hai. File: <code>server/AIBrain.cjs</code></div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-orange">Automation</div>
+      <div class="card-title">Playwright CDP Agent</div>
+      <div class="card-sub">Har browser profile ke andar Playwright connect hota hai via Chrome DevTools Protocol (CDP). File: <code>server/agent.cjs</code></div>
+    </div>
+  </div>
+
+  <h2>Data Flow — Ek Line Mein</h2>
+  <div class="code-block">
+    <span class="comment"># User → UI → Backend → Browser Provider → Profile Launch → CDP → Agent → Article Read → Analytics</span><br/>
+    <br/>
+    <span class="key">Settings Save</span>   →  <span class="val">settings.json</span>  (data folder)<br/>
+    <span class="key">Schedule Start</span>  →  <span class="val">Multilogin/MoreLogin API</span>  →  Browser opens<br/>
+    <span class="key">CDP Connect</span>     →  <span class="val">Playwright</span>  →  Agent starts reading<br/>
+    <span class="key">Article Read</span>    →  <span class="val">analytics_data.json + read_history.json</span><br/>
+    <span class="key">Session Done</span>    →  <span class="val">Browser closes</span>  →  Port cache clear
+  </div>
+
+  <h2>Directory Structure</h2>
+  <table>
+    <tr><th>Path</th><th>Description</th></tr>
+    <tr><td><code>MMB AGENT SITES/src/</code></td><td>React frontend — sabhi pages aur components</td></tr>
+    <tr><td><code>MMB AGENT SITES/server/index.cjs</code></td><td>Main backend server (Express, port 3200)</td></tr>
+    <tr><td><code>MMB AGENT SITES/server/agent.cjs</code></td><td>ProfileAgent class — Playwright automation</td></tr>
+    <tr><td><code>MMB AGENT SITES/server/AIBrain.cjs</code></td><td>Claude AI decision engine</td></tr>
+    <tr><td><code>MMB AGENT SITES/server/orchestrator.cjs</code></td><td>Multi-profile coordination</td></tr>
+    <tr><td><code>MMB AGENT SITES/server/backlinkBuilder.cjs</code></td><td>Backlink traffic builder</td></tr>
+    <tr><td><code>MMB AGENT SITES/data/</code></td><td>Runtime data — settings, analytics, history, CDP cache</td></tr>
+    <tr><td><code>server/providers/</code></td><td>Shared provider code (Multilogin, MoreLogin, AdsPower)</td></tr>
+  </table>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 2: SETUP
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch2">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-green">⚙️</div>
+    <div>
+      <div class="chapter-num">Chapter 02</div>
+      <div class="chapter-title">Installation & Setup</div>
+      <div class="chapter-desc">Tool ko start karne ke liye step-by-step guide</div>
+    </div>
+  </div>
+
+  <h2>Prerequisites</h2>
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-tag tag-green">Required</div>
+      <div class="card-title">Node.js 18+</div>
+      <div class="card-sub">Backend server chalane ke liye. <code>node --version</code> se check karo.</div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-blue">Required</div>
+      <div class="card-title">Multilogin / MoreLogin</div>
+      <div class="card-sub">Antidetect browser — profiles yahan se aate hain. Desktop app installed hona chahiye.</div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-purple">Optional</div>
+      <div class="card-title">Anthropic API Key</div>
+      <div class="card-sub">AI Brain feature ke liye. Settings mein dalo. Bina iske bhi tool kaam karta hai.</div>
+    </div>
+  </div>
+
+  <h2>Backend Start Karo</h2>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-num">1</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Backend Terminal</strong>
+        <span>Naya PowerShell window kholo aur ye commands chalo:</span>
+      </div>
+    </div>
+  </div>
+  <div class="code-block">
+    cd "E:\2026-5-17\MMB AGENT 247\MMB AGENT 247\MMB-AGENT-24-7-main\MMB AGENT SITES\server"<br/>
+    node index.cjs<br/>
+    <span class="comment"># Port 3200 pe start hoga</span>
+  </div>
+
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-num">2</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Frontend Terminal</strong>
+        <span>Doosra PowerShell window kholo:</span>
+      </div>
+    </div>
+  </div>
+  <div class="code-block">
+    cd "E:\2026-5-17\MMB AGENT 247\MMB AGENT 247\MMB-AGENT-24-7-main\MMB AGENT SITES"<br/>
+    npm run dev<br/>
+    <span class="comment"># Port 5200 pe start hoga</span>
+  </div>
+
+  <div class="info-box blue">
+    <div class="info-box-title">🌐 Tool Access</div>
+    Browser mein kholo: <strong>http://localhost:5200</strong><br/>
+    Backend health check: <strong>http://localhost:3200/api/settings</strong>
+  </div>
+
+  <h2>Startup Sequence (Backend ke andar)</h2>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-num">1</div><div class="flow-line"></div><div class="flow-body"><strong>.env file load hoti hai</strong><span>MULTILOGIN_TOKEN, ANTHROPIC_API_KEY, PROXY settings — sab env mein aa jaate hain</span></div></div>
+    <div class="flow-step"><div class="flow-num">2</div><div class="flow-line"></div><div class="flow-body"><strong>settings.json load hoti hai</strong><span>Agar settings.json mein koi value hai to wo .env ko override karta hai (token ke alawa)</span></div></div>
+    <div class="flow-step"><div class="flow-num">3</div><div class="flow-line"></div><div class="flow-body"><strong>CDP port cache load hoti hai</strong><span>data/cdp_ports.json se previous session ke ports yaad rehte hain</span></div></div>
+    <div class="flow-step"><div class="flow-num">4</div><div class="flow-line"></div><div class="flow-body"><strong>Analytics & Read History load hoti hai</strong><span>Persistent data files: analytics_data.json, read_history.json</span></div></div>
+    <div class="flow-step"><div class="flow-num">5</div><div class="flow-line"></div><div class="flow-body"><strong>Cron scheduler start hota hai</strong><span>Agar settings mein cronEnabled=true hai to scheduled automation on ho jaati hai</span></div></div>
+    <div class="flow-step"><div class="flow-num">6</div><div class="flow-line"></div><div class="flow-body"><strong>Express server listen karta hai port 3200 pe</strong><span>Saari API endpoints ready — UI ab connect kar sakta hai</span></div></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 3: SETTINGS
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch3">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-gray">🔧</div>
+    <div>
+      <div class="chapter-num">Chapter 03</div>
+      <div class="chapter-title">Settings & Configuration</div>
+      <div class="chapter-desc">Har setting ka matlab aur kaise use kari jati hai</div>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>Section</th><th>Setting</th><th>Kya karta hai</th><th>Default</th></tr>
+    <tr>
+      <td rowspan="3"><strong>Browser Provider</strong></td>
+      <td>Active Provider</td>
+      <td>Multilogin / MoreLogin / AdsPower — profiles kahan se aate hain</td>
+      <td>multilogin</td>
+    </tr>
+    <tr>
+      <td>Folder ID (Multilogin)</td>
+      <td>Multilogin ka profile group/folder ID — profiles yahan se fetch hote hain</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td>Automation Token</td>
+      <td>30-day permanent token — email/password ki zarurat nahi padti</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td rowspan="4"><strong>Proxy</strong></td>
+      <td>Server</td>
+      <td>Smartproxy server address</td>
+      <td>us.smartproxy.net</td>
+    </tr>
+    <tr>
+      <td>Port</td>
+      <td>Proxy port number</td>
+      <td>3120</td>
+    </tr>
+    <tr>
+      <td>Password / Prefix</td>
+      <td>Smartproxy authentication credentials</td>
+      <td>—</td>
+    </tr>
+    <tr>
+      <td>Default Proxy Life</td>
+      <td>Har proxy session kitni der chale: 1hr/2hr/4hr/8hr/24hr</td>
+      <td>4hr</td>
+    </tr>
+    <tr>
+      <td rowspan="4"><strong>Automation</strong></td>
+      <td>Start Delay (ms)</td>
+      <td>Profile start hone ke baad kitna wait kare pehle action se</td>
+      <td>5000</td>
+    </tr>
+    <tr>
+      <td>Action Delay (ms)</td>
+      <td>Actions ke beech delay</td>
+      <td>2000</td>
+    </tr>
+    <tr>
+      <td>Max Concurrent</td>
+      <td>Ek saath kitne profiles chal sakte hain (1–50)</td>
+      <td>5</td>
+    </tr>
+    <tr>
+      <td>Max Retries</td>
+      <td>Fail hone par kitni baar dobara try kare</td>
+      <td>3</td>
+    </tr>
+    <tr>
+      <td rowspan="3"><strong>Cron / AI</strong></td>
+      <td>Cron Enabled</td>
+      <td>Scheduled automation on/off</td>
+      <td>false</td>
+    </tr>
+    <tr>
+      <td>Cron Schedule</td>
+      <td>Standard cron expression — e.g. <code>*/30 * * * *</code> = har 30 minute</td>
+      <td>0 9 * * *</td>
+    </tr>
+    <tr>
+      <td>Anthropic API Key</td>
+      <td>AI Brain ke liye Claude API key — yahan daalne se har profile mein AI active ho jaata hai</td>
+      <td>—</td>
+    </tr>
+  </table>
+
+  <div class="info-box orange">
+    <div class="info-box-title">⚠️ Important — Token vs Settings</div>
+    Agar tum Multilogin Token Settings page mein nahi dalte, to backend <code>.env</code> file ka token use karta hai. Kabhi bhi settings save karne par .env ka token DELETE nahi hota.
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 4: PROFILE START FLOW
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch4">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-green">▶️</div>
+    <div>
+      <div class="chapter-num">Chapter 04</div>
+      <div class="chapter-title">Profile Start — Step by Step</div>
+      <div class="chapter-desc">Jab tum "Run" dabate ho tab backend mein kya hota hai</div>
+    </div>
+  </div>
+
+  <h2>Full Profile Start Sequence</h2>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-num">1</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>User Schedule/Manual Start Triggers</strong>
+        <span>UI se POST /api/scheduler/run ya /api/manual/start call hoti hai. Profile IDs aur article list backend ko milti hai.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">2</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Launch Queue Mein Entry</strong>
+        <span>ProfileQueue check karta hai — kya 5 se zyada profiles already start ho rahe hain? Agar haan, to wait karta hai. Ye queue Multilogin ko overwhelm hone se bachata hai.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">3</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>startProfileForSchedule() — 4 Attempts</strong>
+        <span><strong>Attempt 1:</strong> Provider API se profile start karo (Multilogin Launcher: port 45001)<br/>
+        <strong>Attempt 2:</strong> CDP port cache check karo — shayad already running ho<br/>
+        <strong>Attempt 3:</strong> Stop karke fresh restart karo<br/>
+        <strong>Attempt 4:</strong> Port range 35000–65000 scan karo running browser dhundhne ke liye</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">4</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>CDP Port Milta Hai</strong>
+        <span>Multilogin browser khulta hai aur ek CDP debug port return karta hai (e.g. 45231). Ye port <code>data/cdp_ports.json</code> mein save ho jaata hai.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">5</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>CDP Port Ready Check (pollCdpPort)</strong>
+        <span>Browser fully start hone mein time lagta hai. Backend 45 seconds tak har 2 sec mein <code>http://127.0.0.1:{port}/json/version</code> check karta hai. Ready hone par aage badhta hai.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">6</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>ProfileAgent Create & Connect</strong>
+        <span>Ek naya ProfileAgent object banta hai. Profile ka persona (deterministic), session intent, bounce chance, AI Brain — sab initialize hote hain. Playwright CDP se connect hota hai.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">7</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Article Reading Session</strong>
+        <span>Agent warmup karta hai (homepage visit), phir articles padh ke analytics save karta hai. Iske baad agle chapter mein detail hai.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box green">
+    <div class="info-box-title">✅ Success State</div>
+    Profile status: <code>starting → connected → reading → done</code><br/>
+    Har step backend console mein log hota hai: <code>[Sites-XXXX] [info] Connected! CDP:45231</code>
+  </div>
+
+  <div class="info-box red">
+    <div class="info-box-title">❌ Failure State</div>
+    Agar 4 attempts ke baad bhi CDP port nahi mila → status: <code>error</code><br/>
+    Common reasons: Multilogin launcher not running, profile ID invalid, network issue
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 5: BROWSER PROVIDERS
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch5">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-blue">🌐</div>
+    <div>
+      <div class="chapter-num">Chapter 05</div>
+      <div class="chapter-title">Browser Provider Integration</div>
+      <div class="chapter-desc">Multilogin, MoreLogin, AdsPower — teen providers, ek system</div>
+    </div>
+  </div>
+
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-tag tag-purple">Recommended</div>
+      <div class="card-title">🔷 Multilogin X</div>
+      <div class="card-sub">
+        <strong>Cloud API:</strong> api.multilogin.com (profiles list/CRUD)<br/>
+        <strong>Local Launcher:</strong> launcher.mlx.yt:45001 (start/stop)<br/>
+        <strong>Auth:</strong> 30-day automation token (preferred) ya email+password<br/>
+        <strong>Profile start:</strong> GET /api/v2/profile/{folder_id}/{profile_id}/start?automation_type=playwright<br/>
+        <strong>Returns:</strong> CDP port for Playwright
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-blue">Supported</div>
+      <div class="card-title">🟦 MoreLogin</div>
+      <div class="card-sub">
+        <strong>Local API:</strong> 127.0.0.1:40000 (desktop app chahiye)<br/>
+        <strong>Auth:</strong> API Key header<br/>
+        <strong>Profile start:</strong> POST /api/env/start<br/>
+        <strong>Returns:</strong> debugPort directly<br/>
+        <strong>Note:</strong> Same machine pe run hota hai
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-green">Supported</div>
+      <div class="card-title">🟩 AdsPower</div>
+      <div class="card-sub">
+        <strong>Local API:</strong> local.adspower.com:50325<br/>
+        <strong>Auth:</strong> API Key<br/>
+        <strong>Profile start:</strong> GET /api/v1/browser/start<br/>
+        <strong>Returns:</strong> ws endpoint (CDP)<br/>
+        <strong>Note:</strong> Desktop app required
+      </div>
+    </div>
+  </div>
+
+  <h2>CDP Port Cache System</h2>
+  <p>Jab bhi koi profile successfully launch hoti hai, uska CDP port <code>data/cdp_ports.json</code> mein save ho jaata hai. Ye file server restart hone par bhi persist karti hai.</p>
+
+  <div class="code-block">
+    <span class="comment">// data/cdp_ports.json example</span><br/>
+    {<br/>
+    &nbsp;&nbsp;<span class="str">"7889cad6-5c93-4dbf-8980-9248f8a9e629"</span>: <span class="val">22066</span>,<br/>
+    &nbsp;&nbsp;<span class="str">"82984cd7-b089-46dd-8033-a1ef01fded99"</span>: <span class="val">41837</span>,<br/>
+    &nbsp;&nbsp;<span class="str">"profile-id-3"</span>: <span class="val">41839</span><br/>
+    }
+  </div>
+
+  <div class="info-box blue">
+    <div class="info-box-title">💡 Cache Ka Faida</div>
+    Agar profile already running hai (manually opened) aur backend restart hua, to cache se port mil jaata hai bina dobara launch kiye. Stop button bhi isi cache se CDP port dhundhta hai.
+  </div>
+
+  <h2>Proxy Integration (Smartproxy)</h2>
+  <p>Profile start karne se pehle proxy configure hota hai. Har session ke liye fresh proxy session milta hai based on "Proxy Life" setting:</p>
+  <table>
+    <tr><th>Life Setting</th><th>Proxy Session Duration</th><th>Best For</th></tr>
+    <tr><td>1hr</td><td>60 minutes</td><td>Quick test runs</td></tr>
+    <tr><td>2hr</td><td>120 minutes</td><td>Short sessions</td></tr>
+    <tr><td>4hr</td><td>240 minutes</td><td>Normal automation (Default)</td></tr>
+    <tr><td>8hr</td><td>480 minutes</td><td>Long sessions</td></tr>
+    <tr><td>24hr</td><td>1440 minutes</td><td>Full day automation</td></tr>
+  </table>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 6: CDP CONNECTION
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch6">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-teal">🔌</div>
+    <div>
+      <div class="chapter-num">Chapter 06</div>
+      <div class="chapter-title">CDP Connection & Agent Initialization</div>
+      <div class="chapter-desc">Playwright kaise browser ke andar ghusta hai</div>
+    </div>
+  </div>
+
+  <h2>Chrome DevTools Protocol (CDP)</h2>
+  <p>Multilogin browser khulne par ek debug port expose karta hai (e.g. 45231). Playwright usi port se connect karke browser ko bilkul ek real user ki tarah control karta hai — no extension fingerprint, no webdriver flag.</p>
+
+  <div class="code-block">
+    <span class="comment">// agent.cjs — connect() method</span><br/>
+    this.browser = await chromium.connectOverCDP(<br/>
+    &nbsp;&nbsp;<span class="str">`http://127.0.0.1:${this.debugPort}`</span>,<br/>
+    &nbsp;&nbsp;{ timeout: 60000 }<br/>
+    );<br/>
+    this.context = this.browser.contexts()[0];<br/>
+    <span class="comment">// 3 attempts with 6s gap between each</span>
+  </div>
+
+  <h2>Agent Initialization — Kya Kya Hota Hai</h2>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="flow-num">1</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Persona Assignment (Deterministic)</strong>
+        <span>Profile ID se ek hash calculate hota hai. Is hash se persona pick hota hai — same profile ko hamesha same persona milta hai. 5 personas available hain.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">2</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Session Intent Pick</strong>
+        <span>research (30%) / casual (40%) / discovery (30%) — per-session thoda random. Research = deep read, Discovery = zyada articles fast.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">3</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Bounce & ReRead Chance Set</strong>
+        <span>Persona ke base value se ±5% random variation. Ye ensure karta hai ki same persona ke different profiles thode alag behave karein.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">4</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>AIBrain Initialize</strong>
+        <span>ANTHROPIC_API_KEY check hoti hai. Agar set hai → AI enabled, warna → off (graceful fallback). Per-session max 25 Claude calls.</span>
+      </div>
+    </div>
+    <div class="flow-step">
+      <div class="flow-num">5</div>
+      <div class="flow-line"></div>
+      <div class="flow-body">
+        <strong>Warmup (Homepage Visit)</strong>
+        <span>First article se pehle agent site ka homepage visit karta hai — jaise real user direct URL type karne ki bajay pehle site dekhe. Researcher/DeepDiver nav menu bhi hover karte hain.</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 7: PERSONAS
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch7">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-purple">🎭</div>
+    <div>
+      <div class="chapter-num">Chapter 07</div>
+      <div class="chapter-title">Persona System — 5 Personality Types</div>
+      <div class="chapter-desc">Har profile ka apna character hota hai — hamesha ke liye</div>
+    </div>
+  </div>
+
+  <p>Persona system ensure karta hai ki traffic bilkul natural lage — sab profiles ek jaisi speed se scroll nahi karenge. Profile ID se deterministic seed nikalti hai, isliye ek profile hamesha same persona rakha karta hai.</p>
+
+  <div class="persona-bar" style="margin-bottom:24px;">
+    <div class="persona-row"><div class="persona-name">🔬 Researcher</div><div class="bar-track"><div class="bar-fill" style="width:15%;background:#3b82f6;"></div></div><div class="persona-desc">Bahut slow — 30px/step, pauses 8%</div></div>
+    <div class="persona-row"><div class="persona-name">😊 Casual</div><div class="bar-track"><div class="bar-fill" style="width:45%;background:#22c55e;"></div></div><div class="persona-desc">Medium — 90px/step, pauses 4%</div></div>
+    <div class="persona-row"><div class="persona-name">⚡ Skimmer</div><div class="bar-track"><div class="bar-fill" style="width:80%;background:#f59e0b;"></div></div><div class="persona-desc">Fast — 150px/step, pauses 1.5%</div></div>
+    <div class="persona-row"><div class="persona-name">🤿 DeepDiver</div><div class="bar-track"><div class="bar-fill" style="width:8%;background:#8b5cf6;"></div></div><div class="persona-desc">Slowest — 40px/step, pauses 12%</div></div>
+    <div class="persona-row"><div class="persona-name">📱 MobileUser</div><div class="bar-track"><div class="bar-fill" style="width:55%;background:#ef4444;"></div></div><div class="persona-desc">Burst scroll — fast/stop/fast</div></div>
+  </div>
+
+  <table>
+    <tr><th>Persona</th><th>Scroll Speed (Body)</th><th>Bounce %</th><th>Re-Read %</th><th>Comments</th><th>Tab Out %</th></tr>
+    <tr><td>🔬 Researcher</td><td>55 px/step</td><td>3%</td><td>60%</td><td>40% reads</td><td>5%</td></tr>
+    <tr><td>😊 Casual</td><td>90 px/step</td><td>10%</td><td>25%</td><td>20% reads</td><td>12%</td></tr>
+    <tr><td>⚡ Skimmer</td><td>150 px/step</td><td>20%</td><td>8%</td><td>5% reads</td><td>8%</td></tr>
+    <tr><td>🤿 DeepDiver</td><td>40 px/step</td><td>1%</td><td>75%</td><td>70% reads</td><td>3%</td></tr>
+    <tr><td>📱 MobileUser</td><td>120 px/step (bursts)</td><td>12%</td><td>20%</td><td>15% reads</td><td>15%</td></tr>
+  </table>
+
+  <h2>Session Intent — 3 Types</h2>
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-tag tag-blue">Research (30%)</div>
+      <div class="card-title">1–2 articles, deep read</div>
+      <div class="card-sub">Dwell time 1.3x zyada. Google search karta hai topic ko dhundhne ke liye. Article bahut dhyan se padhta hai.</div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-green">Casual (40%)</div>
+      <div class="card-title">2–4 articles, normal</div>
+      <div class="card-sub">Default behavior. Na bahut slow, na bahut fast. Natural browsing pattern.</div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-orange">Discovery (30%)</div>
+      <div class="card-title">4–6 articles, fast</div>
+      <div class="card-sub">Dwell time 0.75x. Related links click karta hai. Explore karta hai site ko.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 8: TRAFFIC SOURCES
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch8">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-orange">🚦</div>
+    <div>
+      <div class="chapter-num">Chapter 08</div>
+      <div class="chapter-title">Traffic Source Routing</div>
+      <div class="chapter-desc">Har traffic source ka alag navigation path hota hai</div>
+    </div>
+  </div>
+
+  <p>Har profile ye simulate karta hai ki user article par kahan se aaya — search engine se, direct URL type karke, ya kisi link se. Ye Google Analytics mein real-like traffic sources show karta hai.</p>
+
+  <table>
+    <tr><th>Traffic Source</th><th>Kya Hota Hai</th><th>Realism Level</th></tr>
+    <tr>
+      <td>🔍 <strong>Google</strong></td>
+      <td>google.com pe jaata hai → search query type karta hai (human-like, bezier mouse) → results mein site dhundhta hai → click karta hai</td>
+      <td>⭐⭐⭐⭐⭐ Highest</td>
+    </tr>
+    <tr>
+      <td>🔎 <strong>Bing</strong></td>
+      <td>bing.com pe jaata hai → same search flow</td>
+      <td>⭐⭐⭐⭐</td>
+    </tr>
+    <tr>
+      <td>🦆 <strong>DuckDuckGo</strong></td>
+      <td>duckduckgo.com → search → click</td>
+      <td>⭐⭐⭐⭐</td>
+    </tr>
+    <tr>
+      <td>🔶 <strong>Yahoo</strong></td>
+      <td>search.yahoo.com → search → result click</td>
+      <td>⭐⭐⭐</td>
+    </tr>
+    <tr>
+      <td>🌐 <strong>Direct</strong></td>
+      <td>Article URL seedha type karta hai browser mein — no referrer</td>
+      <td>⭐⭐⭐</td>
+    </tr>
+    <tr>
+      <td>🔗 <strong>Internal</strong></td>
+      <td>Site ke kisi doosre page par pahle jaata hai, phir wahan se article click karta hai</td>
+      <td>⭐⭐⭐⭐</td>
+    </tr>
+    <tr>
+      <td>🔙 <strong>Backlink</strong></td>
+      <td>Kisi external site ke backlink URL se navigate karta hai</td>
+      <td>⭐⭐⭐⭐</td>
+    </tr>
+    <tr>
+      <td>🎲 <strong>Random</strong></td>
+      <td>Har article ke liye randomly ek source choose karta hai</td>
+      <td>⭐⭐⭐⭐⭐ Best Mix</td>
+    </tr>
+  </table>
+
+  <div class="highlight">
+    <h3>AI + Search Query</h3>
+    <p>Jab AI Brain on hai aur traffic source Google/Bing hai, Claude decide karta hai ki kya search query type kari jaye. Ek "Researcher" persona aur ek "Skimmer" persona alag-alag queries type karenge — bilkul real users ki tarah.</p>
+    <p>Example: Article = "Car Insurance Lawyers" → AI query = <code>"best attorney to fight car insurance claim"</code></p>
+  </div>
+
+  <h2>Search Result Matching</h2>
+  <p>Search ke baad agent result page par site ka link dhundhta hai. Agar nahi milta to direct navigation fallback use karta hai. Google search ka full flow:</p>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-num">1</div><div class="flow-line"></div><div class="flow-body"><strong>google.com pe navigate</strong><span>Page load ka wait, cookie banner dismiss</span></div></div>
+    <div class="flow-step"><div class="flow-num">2</div><div class="flow-line"></div><div class="flow-body"><strong>Search box mein click (bezier mouse)</strong><span>Human-like mouse movement — straight line nahi, curve hoti hai</span></div></div>
+    <div class="flow-step"><div class="flow-num">3</div><div class="flow-line"></div><div class="flow-body"><strong>Query type karo (keystroke dynamics)</strong><span>Typos + backspace correction, word-boundary pauses, thinking pauses</span></div></div>
+    <div class="flow-step"><div class="flow-num">4</div><div class="flow-line"></div><div class="flow-body"><strong>Enter press karo</strong><span>Results page load</span></div></div>
+    <div class="flow-step"><div class="flow-num">5</div><div class="flow-line"></div><div class="flow-body"><strong>Site link dhundho & click</strong><span>Agar nahi mila → direct URL navigate karo (fallback)</span></div></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 9: ARTICLE READING
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch9">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-blue">📖</div>
+    <div>
+      <div class="chapter-num">Chapter 09</div>
+      <div class="chapter-title">Article Reading — Scroll & Dwell</div>
+      <div class="chapter-desc">3-phase reading rhythm jo real user ki tarah article padhta hai</div>
+    </div>
+  </div>
+
+  <h2>Dwell Time Calculation</h2>
+  <p>Article kab tak padha jaata hai — ye multiple factors se decide hota hai:</p>
+
+  <div class="code-block">
+    <span class="comment">// Dwell time calculation order</span><br/>
+    1. <span class="key">User config</span>: readTimeMin/readTimeMax (schedule se)<br/>
+    2. <span class="key">Category override</span>: URL mein "mesothelioma" → 8–12 min, "law" → 8–12 min<br/>
+    3. <span class="key">Session intent</span>: research → ×1.3, discovery → ×0.75<br/>
+    4. <span class="key">AI depth</span>: Claude returns 0.2–1.0 multiplier<br/>
+    5. <span class="key">Early bounce</span>: bounceChance % probability → only 15–45% of full time<br/>
+    <br/>
+    <span class="comment">Final: readTime × intentMult × aiDepthMult (or early bounce cutoff)</span>
+  </div>
+
+  <h2>3-Phase Scroll Rhythm</h2>
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-tag tag-orange">Phase 1: INTRO (0–20%)</div>
+      <div class="card-title">Fast Scroll</div>
+      <div class="card-sub">First 20% quickly scroll karo — headline aur intro dekh ke decide karo padhen ya nahi. Speed: persona.fast pixels/step.</div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-blue">Phase 2: BODY (20–80%)</div>
+      <div class="card-title">Slow Scroll (Main Reading)</div>
+      <div class="card-sub">Main content yahan hota hai — ads bhi yahan show hote hain. Speed: persona.body pixels/step. Sab se zyada time yahan bitata hai.</div>
+    </div>
+    <div class="card">
+      <div class="card-tag tag-gray">Phase 3: OUTRO (80–100%)</div>
+      <div class="card-title">Medium Scroll</div>
+      <div class="card-sub">Conclusion aur comments skim karo. Speed: persona.slow pixels/step. DeepDiver yahaan comments padhta hai.</div>
+    </div>
+  </div>
+
+  <h2>Ad Detection & Pause System</h2>
+  <p>Scroll karte waqt agent ads detect karta hai aur unpe pause karta hai — jaise real user ad dekhe:</p>
+  <ul>
+    <li>AdSense iframes: <code>ins.adsbygoogle, iframe[src*="ad"]</code></li>
+    <li>Site-specific ad zones: <code>.ad-zone-in-content, .ad-zone-sidebar, div[class*="ad-zone"]</code></li>
+    <li>Ad milne par 0.5–2.5 seconds pause (configurable)</li>
+    <li>Ad pause count analytics mein track hota hai (<code>adImpressions</code>)</li>
+  </ul>
+
+  <h2>Read History (Duplicate Prevention)</h2>
+  <p>Har padha hua article 24 hours ke liye <code>data/read_history.json</code> mein save hota hai. Agla session fresh articles hi assign karta hai:</p>
+  <div class="code-block">
+    <span class="comment">// Same article dobara nahi padha jayega 24h mein</span><br/>
+    freshArticles = allArticles.filter(a => !recentUrls.has(a.url));<br/>
+    <span class="comment">// recentUrls = last 24h mein padhe articles</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 10: HUMAN SIMULATION
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch10">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-purple">🤖</div>
+    <div>
+      <div class="chapter-num">Chapter 10</div>
+      <div class="chapter-title">Human Simulation Details</div>
+      <div class="chapter-desc">Woh sab techniques jo traffic ko real dikhati hain</div>
+    </div>
+  </div>
+
+  <h2>Bezier Curve Mouse Movement</h2>
+  <p>Mouse kabhi straight line mein nahi chalta — cubic bezier curve use hoti hai:</p>
+  <div class="code-block">
+    <span class="comment">// Cubic Bezier formula — 16–28 intermediate points</span><br/>
+    bezierPt(p0, p1, p2, p3, t) {<br/>
+    &nbsp;&nbsp;u = 1 - t;<br/>
+    &nbsp;&nbsp;return u³×p0 + 3u²t×p1 + 3ut²×p2 + t³×p3<br/>
+    }<br/>
+    <span class="comment">// Ease in/out timing: faster mid-move, slower at start/end</span><br/>
+    ease = 0.4 + sin(t × π) × 0.6
+  </div>
+
+  <h2>Keystroke Dynamics</h2>
+  <table>
+    <tr><th>Feature</th><th>Detail</th></tr>
+    <tr><td>Typing speed</td><td>Persona ke hisaab se 40–300ms per character (Researcher slow, Skimmer fast)</td></tr>
+    <tr><td>Word ease in/out</td><td>Har word ke start/end pe thoda slow, middle mein fast</td></tr>
+    <tr><td>Typo correction</td><td>1.5% chance per character — adjacent key type hoti hai, phir Backspace</td></tr>
+    <tr><td>Thinking pauses</td><td>4% chance per character — 250–700ms extra pause (sooch raha hai)</td></tr>
+    <tr><td>Word boundary pause</td><td>18% chance after space — 120–500ms natural pause</td></tr>
+    <tr><td>Post-type pause</td><td>200–500ms after typing complete</td></tr>
+  </table>
+
+  <h2>Other Human-Like Behaviors</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">🔄 Re-Read (Scroll Back)</div>
+      <div class="card-sub">bounceChance se alag — reReadChance % probability se article ka kuch hissa dobara padhta hai. Scroll up → pause → scroll down thoda. DeepDiver: 75% chance, Skimmer: 8%.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">🍪 Cookie Banner Dismiss</div>
+      <div class="card-sub">17+ CSS selectors detect karte hain cookie/newsletter popups. 600–1800ms delay ke baad dismiss hota hai (jaise real user notice kare phir close kare).</div>
+    </div>
+    <div class="card">
+      <div class="card-title">↕️ Tab Out Simulation</div>
+      <div class="card-sub">Casual/Skimmer/MobileUser kabhi kabhi "tab out" karte hain — scroll ruk jaati hai jaise user kisi doosre tab pe gaya. Random pause 2–8s. Phir wapas aata hai.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">📱 Mobile Burst Scroll</div>
+      <div class="card-sub">MobileUser persona burst mode mein kaam karta hai: fast scroll (5–15 steps) → hard stop → pause 1–4s → phir burst. Fat-finger jitter: ±50% extra randomness.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">🎯 Micro-Interactions</div>
+      <div class="card-sub">Har N scroll steps pe micro-interaction: text selection, hover on paragraph, mouse movement. N = persona.microFreq (6 = DeepDiver frequent, 20 = Skimmer rare).</div>
+    </div>
+    <div class="card">
+      <div class="card-title">🔗 Next/Related Post Click</div>
+      <div class="card-sub">Discovery intent ke profile: article khatam hone par related post ya next post dhundhta hai aur click karta hai — without closing the current session.</div>
+    </div>
+  </div>
+
+  <h2>Scroll Jitter (Natural Imprecision)</h2>
+  <p>Har scroll step pe ±jitter pixels add hota hai — bilkul real mouse wheel ki tarah:</p>
+  <div class="code-block">
+    scrollPx = baseScrollPx × (1 + (random - 0.5) × 2 × jitterRange)<br/>
+    <span class="comment">// jitterRange: Researcher 0.35, Mobile 0.50</span>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 11: AI BRAIN
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch11">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-purple">🧠</div>
+    <div>
+      <div class="chapter-num">Chapter 11</div>
+      <div class="chapter-title">AI Brain — Claude Integration</div>
+      <div class="chapter-desc">Har profile ka apna Claude AI jo real-time decisions leta hai</div>
+    </div>
+  </div>
+
+  <div class="highlight">
+    <h3>AI Brain Kya Karta Hai?</h3>
+    <p>Bina AI ke: har profile pre-defined rules follow karta hai (persona system).<br/>
+    AI ke saath: Claude har session mein real decisions leta hai — kya search karu, kitna padhu, kya karu aage.<br/>
+    <strong>Model:</strong> <code>claude-haiku-4-5-20251001</code> (fastest + cheapest) &nbsp;·&nbsp; <strong>Max:</strong> 80 tokens/call &nbsp;·&nbsp; <strong>Limit:</strong> 25 calls/session</p>
+  </div>
+
+  <h2>4 Types of AI Decisions</h2>
+  <table>
+    <tr><th>Decision</th><th>When</th><th>Input</th><th>Output</th></tr>
+    <tr>
+      <td><strong>Search Query</strong></td>
+      <td>Google/Bing traffic type pe</td>
+      <td>Article title + topic hint</td>
+      <td>Natural query string (max 7 words)</td>
+    </tr>
+    <tr>
+      <td><strong>Read Depth</strong></td>
+      <td>Article khulne ke baad</td>
+      <td>Title + first 200 chars of article</td>
+      <td>Float 0.2–1.0 (dwell time multiplier)</td>
+    </tr>
+    <tr>
+      <td><strong>Next Action</strong></td>
+      <td>Article khatam hone par</td>
+      <td>Articles read count + session time + last title</td>
+      <td>"continue" / "related" / "bounce"</td>
+    </tr>
+    <tr>
+      <td><strong>Topic Query</strong></td>
+      <td>Title unavailable hone par</td>
+      <td>Topic string</td>
+      <td>Search query (max 8 words)</td>
+    </tr>
+  </table>
+
+  <h2>AI System Prompts (Har Decision Ke Liye)</h2>
+  <div class="code-block">
+    <span class="comment">// Search Query</span><br/>
+    System: "You are a <span class="str">{personaName}</span> searching online. Generate a natural Google search query a real person would type. Reply with ONLY the search query. Max 7 words."<br/>
+    <br/>
+    <span class="comment">// Read Depth</span><br/>
+    System: "Decide how deeply to read an article. Reply with ONLY a decimal between 0.2 and 1.0. (0.2=quick skim, 1.0=read every word)."<br/>
+    <br/>
+    <span class="comment">// Next Action</span><br/>
+    System: "Decide your next move. Reply with ONLY one word: 'continue', 'related', or 'bounce'."
+  </div>
+
+  <h2>Cost Estimate</h2>
+  <table>
+    <tr><th>Scenario</th><th>Claude Calls</th><th>Estimated Cost</th></tr>
+    <tr><td>1 profile, 1 article</td><td>~3 calls</td><td>~$0.0001</td></tr>
+    <tr><td>10 profiles, 2 articles each</td><td>~60 calls</td><td>~$0.003</td></tr>
+    <tr><td>100 profiles, 2 articles each</td><td>~600 calls</td><td>~$0.03</td></tr>
+  </table>
+  <div class="info-box green">
+    <div class="info-box-title">💰 Bahut Sasta Hai</div>
+    Claude Haiku $0.25 per million input tokens charge karta hai. 25 calls × 80 tokens = 2000 tokens per session. 1000 sessions bhi ~$0.50 mein aate hain.
+  </div>
+
+  <h2>Fallback System</h2>
+  <ul>
+    <li>API key nahi hai → AI disabled, persona rules use hote hain</li>
+    <li>API call timeout (8s) → null return, persona default use hota hai</li>
+    <li>Invalid response → null return, graceful fallback</li>
+    <li>Session limit (25 calls) exceed → remaining decisions persona se</li>
+  </ul>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 12: SCHEDULER
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch12">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-orange">📅</div>
+    <div>
+      <div class="chapter-num">Chapter 12</div>
+      <div class="chapter-title">Scheduler — Cron & Article Shuffle</div>
+      <div class="chapter-desc">Profiles ko automatically schedule karna</div>
+    </div>
+  </div>
+
+  <h2>Manual Schedule (Scheduler Page)</h2>
+  <p>UI ke Scheduler page se tum manually ek schedule create kar sakte ho:</p>
+  <ul>
+    <li>Profiles select karo (Multilogin folder se)</li>
+    <li>Site aur articles assign karo</li>
+    <li>Traffic source choose karo (google/direct/random)</li>
+    <li>Read time range set karo (e.g. 30–180 seconds)</li>
+    <li>Articles per session set karo</li>
+    <li>"Run Now" dabao → backend ko POST /api/scheduler/run milta hai</li>
+  </ul>
+
+  <h2>Article Shuffle Page</h2>
+  <p>Article Shuffle ek advanced feature hai — har profile ko alag articles milte hain, aur reading pattern bhi customize kiya ja sakta hai:</p>
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Per-Profile Articles</div>
+      <div class="card-sub">Har profile ke liye alag article list. Profile A = Articles 1,3,5. Profile B = Articles 2,4,6. Overlap avoid hota hai.</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Reading Pattern per Profile</div>
+      <div class="card-sub">Har profile ka dwellMin, dwellMax, scrollSpeed, useNextPost — sab alag set kar sakte ho.</div>
+    </div>
+  </div>
+
+  <h2>Cron Scheduler</h2>
+  <p>Settings mein Cron enable karne par backend automatically schedule chalata hai:</p>
+  <table>
+    <tr><th>Preset</th><th>Cron Expression</th><th>Meaning</th></tr>
+    <tr><td>Every 15 min</td><td><code>*/15 * * * *</code></td><td>Din mein 96 baar</td></tr>
+    <tr><td>Every 30 min</td><td><code>*/30 * * * *</code></td><td>Din mein 48 baar</td></tr>
+    <tr><td>Every hour</td><td><code>0 * * * *</code></td><td>Din mein 24 baar</td></tr>
+    <tr><td>Every 3 hours</td><td><code>0 */3 * * *</code></td><td>Din mein 8 baar</td></tr>
+    <tr><td>Every 6 hours</td><td><code>0 */6 * * *</code></td><td>Din mein 4 baar</td></tr>
+    <tr><td>Daily 9am</td><td><code>0 9 * * *</code></td><td>Roz subah ek baar</td></tr>
+  </table>
+
+  <h2>Concurrent Profile Management</h2>
+  <p>Ek saath 5 se zyada profiles start nahi hote (LaunchQueue). Agar 20 profiles hain:</p>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-num">1</div><div class="flow-line"></div><div class="flow-body"><strong>Batch 1 (Profiles 1–5)</strong><span>Sabhi start hote hain, 2s gap within batch. Phir 30s wait.</span></div></div>
+    <div class="flow-step"><div class="flow-num">2</div><div class="flow-line"></div><div class="flow-body"><strong>Batch 2 (Profiles 6–10)</strong><span>30 second baad start hota hai — Multilogin ko fully launch karne ka time</span></div></div>
+    <div class="flow-step"><div class="flow-num">3</div><div class="flow-line"></div><div class="flow-body"><strong>All profiles run in parallel</strong><span>Sab ek saath articles padh rahe hain — sirf start staggered tha</span></div></div>
+    <div class="flow-step"><div class="flow-num">4</div><div class="flow-line"></div><div class="flow-body"><strong>Session complete → browser close</strong><span>Har profile apna session khatam karke browser band karta hai</span></div></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 13: BACKLINK BUILDER
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch13">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-green">🔗</div>
+    <div>
+      <div class="chapter-num">Chapter 13</div>
+      <div class="chapter-title">Backlink Builder</div>
+      <div class="chapter-desc">External sites se referral traffic generate karna</div>
+    </div>
+  </div>
+
+  <p>Backlink Builder ek alag feature hai jo external websites par seedha navigate karta hai aur wahan se target site par backlink click karta hai — jaise kisi news article ya blog pe link tha.</p>
+
+  <h2>Backlink Flow</h2>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-num">1</div><div class="flow-line"></div><div class="flow-body"><strong>External URL pe Navigate</strong><span>Profile external site (e.g. forbes.com/article) par jaata hai</span></div></div>
+    <div class="flow-step"><div class="flow-num">2</div><div class="flow-line"></div><div class="flow-body"><strong>Page Read (Brief)</strong><span>10–30 seconds external page pe spend karta hai — realistic referral behavior</span></div></div>
+    <div class="flow-step"><div class="flow-num">3</div><div class="flow-line"></div><div class="flow-body"><strong>Target Link Click</strong><span>Target article URL ka link dhundhta hai, scroll to visible, phir click karta hai</span></div></div>
+    <div class="flow-step"><div class="flow-num">4</div><div class="flow-line"></div><div class="flow-body"><strong>Target Article Read</strong><span>Normal article reading session — traffic source = "backlink" record hota hai</span></div></div>
+  </div>
+
+  <h2>Backlink Pool Page (UI)</h2>
+  <p>UI ka "Backlinks" page (BacklinksPage.tsx) se tum manage kar sakte ho:</p>
+  <ul>
+    <li>Source URLs (external sites jahan se traffic aayega)</li>
+    <li>Target articles (tumhare site ke articles)</li>
+    <li>Per-profile backlink assignment</li>
+    <li>Run schedule — kab chalega backlink traffic</li>
+  </ul>
+
+  <div class="info-box orange">
+    <div class="info-box-title">⚠️ Realistic Referral Headers</div>
+    Backlink traffic mein HTTP Referer header properly set hota hai — Google Analytics mein "backlink" ya "referral" traffic dikhta hai — direct nahi.
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 14: ANALYTICS
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch14">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-teal">📊</div>
+    <div>
+      <div class="chapter-num">Chapter 14</div>
+      <div class="chapter-title">Analytics & Read History</div>
+      <div class="chapter-desc">Kya track hota hai aur kahan save hota hai</div>
+    </div>
+  </div>
+
+  <h2>analytics_data.json — Kya Save Hota Hai</h2>
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">📈 Global Totals</div>
+      <div class="card-sub">
+        <code>totalReads</code> — kul articles padhe<br/>
+        <code>totalDwellTime</code> — total seconds spent<br/>
+        <code>totalSessions</code> — total sessions run<br/>
+        <code>adImpressions</code> — kul ad pauses
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🌐 Traffic Sources</div>
+      <div class="card-sub">
+        <code>trafficSources.google</code> — count<br/>
+        <code>trafficSources.bing</code> — count<br/>
+        <code>trafficSources.direct</code> — count<br/>
+        <code>trafficSources.backlink</code> — count
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">👤 Per-Profile Stats</div>
+      <div class="card-sub">
+        Har profile ke liye: reads, dwellTime, comments, sessions<br/>
+        Profile ID se keyed — UI mein individual stats dikhate hain
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">🏠 Per-Site Stats</div>
+      <div class="card-sub">
+        Har domain ke liye: reads, dwellTime<br/>
+        Site hostname se keyed — dashboard mein site-wise breakdown
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div class="card-title">⚡ Recent Activity (Last 100)</div>
+    <div class="card-sub">Real-time feed: profileId, url, title, dwellTime, trafficSource, readAt timestamp. Dashboard pe live scroll hota hai.</div>
+  </div>
+
+  <h2>read_history.json — Duplicate Prevention</h2>
+  <p>Har profile ke liye last 24h mein padhe URLs store hote hain. Next session mein ye articles skip ho jaate hain — ek hi profile ek article baar baar nahi padhi.</p>
+
+  <div class="code-block">
+    <span class="comment">// read_history.json structure</span><br/>
+    {<br/>
+    &nbsp;&nbsp;<span class="str">"profile-id-1"</span>: [<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;{ <span class="key">url</span>: <span class="str">"https://site.com/article-1"</span>, <span class="key">dwellTime</span>: <span class="val">63</span>, <span class="key">readAt</span>: <span class="val">1779247390711</span> },<br/>
+    &nbsp;&nbsp;&nbsp;&nbsp;{ <span class="key">url</span>: <span class="str">"https://site.com/article-2"</span>, <span class="key">dwellTime</span>: <span class="val">145</span>, <span class="key">readAt</span>: <span class="val">1779247391000</span> }<br/>
+    &nbsp;&nbsp;]<br/>
+    }<br/>
+    <span class="comment">// 24h se purane entries automatically delete hote hain</span>
+  </div>
+
+  <h2>Agent Error Log</h2>
+  <p>Koi bhi automation error <code>data/agent_errors.log</code> mein append hota hai:</p>
+  <div class="code-block">
+    [2026-05-23T08:45:12.000Z] Sites-ABCD | "Article Title" | ERR: Navigation timeout exceeded
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 15: PROFILE STOP
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch15">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-red">⏹️</div>
+    <div>
+      <div class="chapter-num">Chapter 15</div>
+      <div class="chapter-title">Profile Stop — Step by Step</div>
+      <div class="chapter-desc">Session khatam hone par kya hota hai</div>
+    </div>
+  </div>
+
+  <h2>Automatic Stop (Session Complete)</h2>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-num">1</div><div class="flow-line"></div><div class="flow-body"><strong>All articles padhe ja chuke</strong><span>getArticlesForProfile() ne jitne fresh articles the, sab read ho gaye</span></div></div>
+    <div class="flow-step"><div class="flow-num">2</div><div class="flow-line"></div><div class="flow-body"><strong>agent.disconnect() call hota hai</strong><span>Playwright browser se gracefully disconnect hota hai — no crash</span></div></div>
+    <div class="flow-step"><div class="flow-num">3</div><div class="flow-line"></div><div class="flow-body"><strong>activeAgents Map se delete</strong><span>Profile agent memory se clean up hota hai</span></div></div>
+    <div class="flow-step"><div class="flow-num">4</div><div class="flow-line"></div><div class="flow-body"><strong>closeProfileForSchedule() call hota hai</strong><span>Provider API se profile close kiya jaata hai: Multilogin → GET /api/v1/profile/stop</span></div></div>
+    <div class="flow-step"><div class="flow-num">5</div><div class="flow-line"></div><div class="flow-body"><strong>Browser window band hoti hai</strong><span>Multilogin browser automatically close ho jaata hai</span></div></div>
+    <div class="flow-step"><div class="flow-num">6</div><div class="flow-line"></div><div class="flow-body"><strong>progressEntry.status = 'done'</strong><span>Schedule status update hota hai — UI mein "done" dikhta hai</span></div></div>
+  </div>
+
+  <h2>Manual Stop (UI Stop Button)</h2>
+  <div class="flow">
+    <div class="flow-step"><div class="flow-num">1</div><div class="flow-line"></div><div class="flow-body"><strong>UI Stop button press → POST /api/manual/stop</strong><span>profileId aur browserType backend ko milte hain</span></div></div>
+    <div class="flow-step"><div class="flow-num">2</div><div class="flow-line"></div><div class="flow-body"><strong>Active agent disconnect</strong><span>activeAgents.get(profileId) → disconnect() → Map se delete</span></div></div>
+    <div class="flow-step"><div class="flow-num">3</div><div class="flow-line"></div><div class="flow-body"><strong>closeProfileForSchedule()</strong><span>Provider API se profile close — browser band</span></div></div>
+  </div>
+
+  <h2>Schedule Cancel (Mid-Run)</h2>
+  <p>Agar schedule chal raha hai aur tum beech mein "Cancel" dabate ho:</p>
+  <div class="code-block">
+    POST /api/scheduler/stop<br/>
+    { <span class="key">scheduleId</span>: <span class="str">"schedule-id-here"</span> }<br/>
+    <br/>
+    <span class="comment">// cancelledSchedules Set mein add hota hai</span><br/>
+    <span class="comment">// Next loop iteration mein check hota hai → graceful exit</span><br/>
+    <span class="comment">// Already reading profiles apna current article finish karte hain phir stop</span>
+  </div>
+
+  <h2>Error Recovery Stop</h2>
+  <p>Agar koi unexpected error aaye reading ke dauran:</p>
+  <ul>
+    <li>Agent page close karta hai (<code>page.close()</code>)</li>
+    <li>3 retries tak try karta hai (different traffic source pe)</li>
+    <li>3 retries ke baad error log hota hai</li>
+    <li>Profile disconnect + close hota hai (zombie browser prevent)</li>
+    <li>Error <code>data/agent_errors.log</code> mein save hota hai</li>
+  </ul>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 16: API REFERENCE
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch16">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-blue">🔌</div>
+    <div>
+      <div class="chapter-num">Chapter 16</div>
+      <div class="chapter-title">API Reference</div>
+      <div class="chapter-desc">Backend ke saare endpoints — port 3200</div>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>Method</th><th>Endpoint</th><th>Description</th></tr>
+    <tr><td><span class="badge tag-green">GET</span></td><td><code>/api/settings</code></td><td>Current settings fetch karo</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/settings</code></td><td>Settings save karo (env mein bhi apply hote hain)</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/test-connection</code></td><td>Provider connection test karo {provider}</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/scheduler/run</code></td><td>Schedule start karo (schedule object pass karo)</td></tr>
+    <tr><td><span class="badge tag-green">GET</span></td><td><code>/api/scheduler/status</code></td><td>Sab running schedules ka status</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/scheduler/stop</code></td><td>Schedule cancel karo {scheduleId}</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/manual/start</code></td><td>Profiles manually start karo {profileIds[] ya profiles[]}</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/manual/stop</code></td><td>Profiles manually stop karo</td></tr>
+    <tr><td><span class="badge tag-green">GET</span></td><td><code>/api/analytics</code></td><td>Live analytics data</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/analytics/reset</code></td><td>Analytics reset karo</td></tr>
+    <tr><td><span class="badge tag-green">GET</span></td><td><code>/status</code></td><td>Active agents status</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/read-history/add</code></td><td>Read history mein entry add karo</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/read-history/check</code></td><td>Article already read hai? Check karo</td></tr>
+    <tr><td><span class="badge tag-green">GET</span></td><td><code>/api/update/version</code></td><td>Current version check</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/api/update/push</code></td><td>GitHub pe code push karo</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/start</code></td><td>Profile start (legacy endpoint)</td></tr>
+    <tr><td><span class="badge tag-blue">POST</span></td><td><code>/stop</code></td><td>Profile stop (legacy endpoint)</td></tr>
+    <tr><td><span class="badge tag-green">GET</span></td><td><code>/logs</code></td><td>Recent agent logs</td></tr>
+  </table>
+
+  <h2>Schedule Object Format</h2>
+  <div class="code-block">
+    POST /api/scheduler/run<br/>
+    {<br/>
+    &nbsp;&nbsp;<span class="key">"id"</span>: <span class="str">"my-schedule-1"</span>,<br/>
+    &nbsp;&nbsp;<span class="key">"name"</span>: <span class="str">"Morning Run"</span>,<br/>
+    &nbsp;&nbsp;<span class="key">"provider"</span>: <span class="str">"multilogin"</span>,<br/>
+    &nbsp;&nbsp;<span class="key">"selectedProfiles"</span>: [<span class="str">"profile-uuid-1"</span>, <span class="str">"profile-uuid-2"</span>],<br/>
+    &nbsp;&nbsp;<span class="key">"articles"</span>: [{ <span class="key">"url"</span>: <span class="str">"https://site.com/article"</span>, <span class="key">"title"</span>: <span class="str">"Article Title"</span>, <span class="key">"siteUrl"</span>: <span class="str">"https://site.com"</span> }],<br/>
+    &nbsp;&nbsp;<span class="key">"trafficSource"</span>: <span class="str">"random"</span>,<br/>
+    &nbsp;&nbsp;<span class="key">"readTimeMin"</span>: <span class="val">30</span>,<br/>
+    &nbsp;&nbsp;<span class="key">"readTimeMax"</span>: <span class="val">180</span>,<br/>
+    &nbsp;&nbsp;<span class="key">"scrollSpeed"</span>: <span class="str">"medium"</span>,<br/>
+    &nbsp;&nbsp;<span class="key">"articlesPerSession"</span>: <span class="val">2</span><br/>
+    }
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════
+     CH 17: TROUBLESHOOTING
+══════════════════════════════════════════════ -->
+<div class="chapter" id="ch17">
+  <div class="chapter-header">
+    <div class="chapter-icon icon-red">🛠️</div>
+    <div>
+      <div class="chapter-num">Chapter 17</div>
+      <div class="chapter-title">Troubleshooting</div>
+      <div class="chapter-desc">Common problems aur unke solutions</div>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>Problem</th><th>Reason</th><th>Fix</th></tr>
+    <tr>
+      <td>All profiles show "error"</td>
+      <td>Multilogin launcher nahi chal raha, ya profile IDs galat hain (MoreLogin IDs Multilogin mein nahi chalenge)</td>
+      <td>Multilogin desktop app open karo. Task Manager mein <strong>MLXDesktopApp</strong> check karo. Port 45001 listen ho raha ho.</td>
+    </tr>
+    <tr>
+      <td>Backend start nahi hota</td>
+      <td>Port 3200 already in use, ya node_modules install nahi hue</td>
+      <td><code>netstat -ano | findstr :3200</code> se PID dhundho aur kill karo. Ya <code>npm install</code> MMB AGENT SITES folder mein.</td>
+    </tr>
+    <tr>
+      <td>Frontend port 5200 error</td>
+      <td>Vite already chal raha hai ya koi doosri process port le rahi hai</td>
+      <td><code>netstat -ano | findstr :5200</code> → process kill karo → dobara start</td>
+    </tr>
+    <tr>
+      <td>AI Brain "off" dikh raha hai</td>
+      <td>ANTHROPIC_API_KEY set nahi, ya Settings save nahi ki</td>
+      <td>Settings page → AI Brain section → API key daalo → Save dabao → Backend restart karo</td>
+    </tr>
+    <tr>
+      <td>Token invalid error</td>
+      <td>30-day token expire ho gaya</td>
+      <td>Multilogin account se naya automation token generate karo → .env mein update karo → backend restart</td>
+    </tr>
+    <tr>
+      <td>CDP connection fails</td>
+      <td>Browser fully start nahi hua, ya port change ho gaya</td>
+      <td>data/cdp_ports.json delete karo → dobara schedule run karo. Backend 45 seconds tak poll karta hai.</td>
+    </tr>
+    <tr>
+      <td>Articles read nahi ho rahe (0 reads)</td>
+      <td>Sab articles already read ho chuke hain (24h cache)</td>
+      <td>Naye articles add karo, ya data/read_history.json delete karo (reset history)</td>
+    </tr>
+    <tr>
+      <td>Settings save kar ke bhi proxy kaam nahi kar raha</td>
+      <td>Purana proxy config cached hai</td>
+      <td>Backend restart karo — applySettingsToEnv() startup pe fresh values set karta hai</td>
+    </tr>
+    <tr>
+      <td>Stop button kaam nahi kar raha</td>
+      <td>CDP port cache mein nahi tha (pehle wale session mein save nahi hua)</td>
+      <td>Ab fixed hai — startProfile ke baad automatically cdp_ports.json mein save hota hai</td>
+    </tr>
+  </table>
+
+  <h2>Quick Health Check Commands</h2>
+  <div class="code-block">
+    <span class="comment"># Backend alive hai?</span><br/>
+    curl http://localhost:3200/api/settings<br/>
+    <br/>
+    <span class="comment"># Multilogin launcher chal raha hai?</span><br/>
+    netstat -ano | findstr :45001<br/>
+    <br/>
+    <span class="comment"># Running schedules?</span><br/>
+    curl http://localhost:3200/api/scheduler/status<br/>
+    <br/>
+    <span class="comment"># CDP cache contents?</span><br/>
+    type "MMB AGENT SITES\data\cdp_ports.json"<br/>
+    <br/>
+    <span class="comment"># Recent errors?</span><br/>
+    type "MMB AGENT SITES\data\agent_errors.log"
+  </div>
+
+  <div class="info-box blue" style="margin-top:32px;">
+    <div class="info-box-title">📌 Path Quick Reference</div>
+    <strong>Project Root:</strong> <code>E:\2026-5-17\MMB AGENT 247\MMB AGENT 247\MMB-AGENT-24-7-main\</code><br/>
+    <strong>MMB Agent Sites:</strong> <code>...MMB-AGENT-24-7-main\MMB AGENT SITES\</code><br/>
+    <strong>Backend:</strong> <code>...MMB AGENT SITES\server\index.cjs</code> → Port 3200<br/>
+    <strong>Frontend:</strong> <code>...MMB AGENT SITES\</code> → <code>npm run dev</code> → Port 5200<br/>
+    <strong>Data Files:</strong> <code>...MMB AGENT SITES\data\</code>
+  </div>
+</div>
+
+</body>
+</html>

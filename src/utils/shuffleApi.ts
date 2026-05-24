@@ -8,6 +8,8 @@ export interface ShuffleStatePayload {
   assignments: unknown[];
   channelConfigs: unknown[];
   enabledChannelIds: number[];
+  settings?: Record<string, unknown>;
+  recycleConfig?: Record<string, unknown>;
 }
 
 export async function fetchShuffleStateFromServer(): Promise<ShuffleStatePayload | null> {

@@ -80,10 +80,63 @@ describe('MultiloginProvider.buildFingerprintPayload', () => {
     });
   });
 
-  test('fonts are a flat array', () => {
-    const fonts = ['Arial', 'Verdana'];
-    const payload = provider.buildFingerprintPayload({ fonts });
-    expect(payload.fonts).toEqual(fonts);
+  test('includes graphic, media_devices, localization for full antidetect', () => {
+    const payload = provider.buildFingerprintPayload({
+      language: 'en-US',
+      webGLMeta: { vendor: 'Google Inc. (NVIDIA)', renderer: 'ANGLE NVIDIA RTX 3060' },
+      mediaDevices: { audioInputs: 1, videoInputs: 1, audioOutputs: 2 },
+      canvasNoise: { enabled: true, seed: 'abc12345' },
+      webGLNoise: { enabled: true, seed: 'def67890' },
+      audioContextNoise: { enabled: true, seed: 'ghi11223' },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
+      os: 'Windows',
+      cpu: 8,
+      ram: 16,
+      resolution: '1920x1080',
+      timezone: 'America/Chicago',
+      fonts: ['Arial', 'Verdana'],
+    });
+    expect(payload.graphic).toEqual({
+      vendor: 'Google Inc. (NVIDIA)',
+      renderer: 'ANGLE NVIDIA RTX 3060',
+    });
+    expect(payload.media_devices).toEqual({
+      audio_inputs: 1,
+      video_inputs: 1,
+      audio_outputs: 2,
+    });
+    expect(payload.localization).toMatchObject({
+      languages: 'en-US',
+      locale: 'en-US',
+    });
+    expect(payload.canvas.seed).toBe('abc12345');
+  });
+
+  test('_buildAntidetectParameters sets mask flags for noise seeds', () => {
+    const { flags, fingerprint } = provider._buildAntidetectParameters({
+      os: 'Windows',
+      fingerprint: {
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0',
+        timezone: 'America/New_York',
+        language: 'en-US',
+        resolution: '1920x1080',
+        cpu: 8,
+        ram: 8,
+        canvasNoise: { seed: 'seed1111' },
+        webGLNoise: { seed: 'seed2222' },
+        audioContextNoise: { seed: 'seed3333' },
+        webGLMeta: { vendor: 'Google Inc.', renderer: 'ANGLE AMD' },
+        mediaDevices: { audioInputs: 1, videoInputs: 1, audioOutputs: 2 },
+        fonts: ['Arial'],
+      },
+    }, true);
+    expect(flags.canvas_noise).toBe('mask');
+    expect(flags.graphics_noise).toBe('mask');
+    expect(flags.audio_masking).toBe('mask');
+    expect(flags.webrtc_masking).toBe('mask');
+    expect(flags.graphics_masking).toBe('custom');
+    expect(fingerprint.canvas.seed).toBe('seed1111');
+    expect(fingerprint.media_devices).toBeDefined();
   });
 
   test('returns {} when config is null/undefined', () => {

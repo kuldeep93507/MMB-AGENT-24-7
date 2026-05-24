@@ -52,6 +52,7 @@ export default function RateLimitDashboard({ profiles }: RateLimitDashboardProps
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-white font-semibold flex items-center gap-2">
           📊 Rate Limits (Today)
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 border border-amber-700/40 font-normal">Coming Soon — tracking only</span>
           {loading && <span className="text-xs text-yellow-400 font-normal">syncing…</span>}
         </h2>
         <button
@@ -111,7 +112,7 @@ export default function RateLimitDashboard({ profiles }: RateLimitDashboardProps
         )}
       </div>
       <p className="text-xs text-gray-600 mt-3 text-center">
-        Midnight reset (server) • Caps in Profile Settings • Reset clears today&apos;s engagement log only
+        Midnight reset (server) • Caps in Profile Settings • Daily cap enforcement — <span className="text-amber-500/80">Coming Soon</span>
       </p>
     </div>
   );

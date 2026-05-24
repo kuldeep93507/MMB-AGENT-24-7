@@ -18,8 +18,10 @@ interface NewProfileModalProps {
 export default function NewProfileModal({ onClose, onCreate }: NewProfileModalProps) {
   const [selectedOS, setSelectedOS] = useState<OS | null>(null);
   const [selectedProxy, setSelectedProxy] = useState<MultiloginProxyType>('multilogin_residential');
+  const [count, setCount] = useState(1);
   const [creating, setCreating] = useState(false);
   const [stepLogs, setStepLogs] = useState<string[]>([]);
+  const [createdCount, setCreatedCount] = useState(0);
   const browserProvider = useStore(s => s.browserProvider);
   const providerLabel = PROVIDER_LABELS[browserProvider] ?? 'Provider';
   const isMultilogin = browserProvider === 'multilogin';
@@ -47,26 +49,38 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
     purple: 'border-purple-400 bg-purple-500/20 ring-2 ring-purple-500/40',
   };
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!selectedOS) return;
     setCreating(true);
-    const steps = [
-      { delay: 300,  msg: `✅ Step 1: OS Selected — ${selectedOS}` },
-      { delay: 700,  msg: '⚙️  Step 2: Generating US state + city + session ID...' },
-      { delay: 1200, msg: '🔗  Step 3: Building proxy config...' },
-      { delay: 1800, msg: `📡  Step 4: ${providerLabel} API — creating profile...` },
-      { delay: 2400, msg: '🚀  Step 5: Assigning unique IP + fingerprint...' },
-      { delay: 3000, msg: '💾  Step 6: Profile saved — ready for article reading' },
-      { delay: 3500, msg: '✅  Profile created successfully!' },
-    ];
-    steps.forEach(({ delay, msg }) => {
-      setTimeout(() => {
-        setStepLogs(prev => [...prev, msg]);
-        if (delay === 3500) {
-          setTimeout(() => { onCreate(selectedOS, isMultilogin ? selectedProxy : undefined); onClose(); }, 400);
-        }
-      }, delay);
-    });
+    setCreatedCount(0);
+
+    for (let i = 0; i < count; i++) {
+      const num = i + 1;
+      setStepLogs(prev => [...prev, `⏳ Profile ${num}/${count} — creating...`]);
+      await new Promise<void>(resolve => {
+        const steps = [
+          { delay: 300,  msg: `  ⚙️  OS: ${selectedOS} | Fingerprint generating...` },
+          { delay: 800,  msg: `  🔗  Proxy config building...` },
+          { delay: 1400, msg: `  📡  ${providerLabel} API — creating profile ${num}...` },
+          { delay: 2000, msg: `  ✅  Profile ${num}/${count} created!` },
+        ];
+        steps.forEach(({ delay, msg }) => {
+          setTimeout(() => {
+            setStepLogs(prev => [...prev, msg]);
+            if (delay === 2000) {
+              onCreate(selectedOS, isMultilogin ? selectedProxy : undefined);
+              setCreatedCount(c => c + 1);
+              resolve();
+            }
+          }, delay);
+        });
+      });
+      // Small gap between profiles
+      if (i < count - 1) await new Promise(r => setTimeout(r, 500));
+    }
+
+    setStepLogs(prev => [...prev, `🎉 Done! ${count} profile${count > 1 ? 's' : ''} created successfully.`]);
+    setTimeout(() => onClose(), 800);
   };
 
   return (
@@ -86,9 +100,34 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
           {!creating ? (
             <>
               <p className="text-gray-400 text-sm mb-4 bg-gray-800/60 border border-gray-700 rounded-xl p-3">
-                <span className="text-yellow-400 font-medium">👤 Your only task:</span> Choose an OS below.
+                <span className="text-yellow-400 font-medium">👤 Your only task:</span> Choose OS + count below.
                 Proxy, fingerprint, {providerLabel} setup — all automatic.
               </p>
+
+              {/* Count Selector */}
+              <div className="mb-4">
+                <p className="text-gray-400 text-xs font-medium mb-2">How many profiles to create?</p>
+                <div className="flex items-center gap-3">
+                  <button onClick={() => setCount(c => Math.max(1, c - 1))}
+                    className="w-8 h-8 rounded-lg bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700 text-lg font-bold flex items-center justify-center">−</button>
+                  <div className="flex-1 text-center">
+                    <span className="text-3xl font-bold text-white">{count}</span>
+                    <span className="text-gray-500 text-sm ml-2">profile{count > 1 ? 's' : ''}</span>
+                  </div>
+                  <button onClick={() => setCount(c => Math.min(20, c + 1))}
+                    className="w-8 h-8 rounded-lg bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700 text-lg font-bold flex items-center justify-center">+</button>
+                </div>
+                {/* Quick count chips */}
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  {[1, 3, 5, 10, 15, 20].map(n => (
+                    <button key={n} onClick={() => setCount(n)}
+                      className={`px-3 py-1 rounded-lg text-xs font-semibold border transition-all
+                        ${count === n ? 'bg-green-600/30 border-green-500/50 text-green-300' : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-gray-200'}`}>
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="space-y-3">
                 {OS_OPTIONS.map(({ os, icon, desc, color }) => {
                   const isSelected = selectedOS === os;
@@ -134,23 +173,38 @@ export default function NewProfileModal({ onClose, onCreate }: NewProfileModalPr
                 <button onClick={onClose} className="flex-1 px-4 py-2.5 rounded-xl border border-gray-700 text-gray-400 hover:text-gray-200 text-sm font-medium">Cancel</button>
                 <button onClick={handleCreate} disabled={!selectedOS}
                   className="flex-1 px-4 py-2.5 rounded-xl bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-semibold flex items-center justify-center gap-2">
-                  <Zap size={16} /> Create Profile
+                  <Zap size={16} /> Create {count > 1 ? `${count} Profiles` : 'Profile'}
                 </button>
               </div>
             </>
           ) : (
             <div className="space-y-2">
-              {stepLogs.map((log, i) => (
-                <div key={i} className="text-sm text-gray-300 font-mono animate-pulse-once">{log}</div>
-              ))}
-              {stepLogs.length < 7 && (
-                <div className="flex items-center gap-2 mt-4">
+              {/* Progress bar */}
+              {count > 1 && (
+                <div className="mb-4">
+                  <div className="flex justify-between text-xs text-gray-400 mb-1">
+                    <span>Creating profiles...</span>
+                    <span>{createdCount}/{count}</span>
+                  </div>
+                  <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-green-500 rounded-full transition-all duration-500"
+                      style={{ width: `${(createdCount / count) * 100}%` }} />
+                  </div>
+                </div>
+              )}
+              <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
+                {stepLogs.map((log, i) => (
+                  <div key={i} className="text-xs text-gray-300 font-mono">{log}</div>
+                ))}
+              </div>
+              {createdCount < count && (
+                <div className="flex items-center gap-2 mt-3">
                   <div className="flex gap-1">
                     <div className="w-2 h-2 rounded-full bg-green-500 animate-bounce" style={{ animationDelay: '0ms' }} />
                     <div className="w-2 h-2 rounded-full bg-green-500 animate-bounce" style={{ animationDelay: '150ms' }} />
                     <div className="w-2 h-2 rounded-full bg-green-500 animate-bounce" style={{ animationDelay: '300ms' }} />
                   </div>
-                  <span className="text-gray-500 text-sm">Processing...</span>
+                  <span className="text-gray-500 text-sm">Creating profile {createdCount + 1} of {count}...</span>
                 </div>
               )}
             </div>

@@ -126,6 +126,8 @@ export function proxyFromBackendCreate(proxyData: {
   life?: string;
   assignedAt?: number;
   expiresAt?: number;
+  type?: string;
+  country?: string;
 }): ProxyConfig {
   const lifeKnown =
     proxyData.life &&
@@ -136,15 +138,39 @@ export function proxyFromBackendCreate(proxyData: {
     server: proxyData.server || "",
     port: proxyData.port || 0,
     username:
-      "(assigned — username/password not returned in API response)",
+      proxyData.type === 'multilogin_residential'
+        ? `MLX ${(proxyData.country || 'us').toUpperCase()}`
+        : "(assigned — username/password not returned in API response)",
     password: "",
-    state: proxyData.state || "",
+    state: proxyData.state || (proxyData.type === 'multilogin_residential' ? proxyData.country?.toUpperCase() || 'US' : ''),
     city: proxyData.city || "",
     life: lifeKnown,
     sessionId: proxyData.sessionId || "",
     assignedAt: proxyData.assignedAt || Date.now(),
     expiresAt: proxyData.expiresAt || 0,
   };
+}
+
+export function isMultiloginProxyHost(host?: string): boolean {
+  const h = String(host || '').toLowerCase();
+  return h.includes('multilogin.com') || h.includes('gate.multilogin');
+}
+
+export function isSmartProxyHost(host?: string): boolean {
+  return String(host || '').toLowerCase().includes('smartproxy.net');
+}
+
+export function inferProxyTypeFromProfile(profile: Pick<Profile, 'proxy'>): 'multilogin' | 'smartproxy' {
+  if (isMultiloginProxyHost(profile.proxy.server)) return 'multilogin';
+  if (isSmartProxyHost(profile.proxy.server)) return 'smartproxy';
+  return 'smartproxy';
+}
+
+export function proxyProviderLabel(host?: string): string {
+  if (isMultiloginProxyHost(host)) return 'Multilogin Built-in';
+  if (isSmartProxyHost(host)) return 'SmartProxy';
+  if (host) return host;
+  return 'Unknown';
 }
 
 /** Maps provider list status → Profile card status */
@@ -159,12 +185,16 @@ function mapListStatus(raw: string): Profile["status"] {
 function proxyHintsFromRow(sp: ProviderListRow): ProxyConfig | null {
   const host = String(sp.proxyHost || "").trim();
   if (!host) return null;
-  return {
+  const base = {
     ...unknownProxy(),
     server: host,
     port: Number(sp.proxyPort) || 0,
     username: String(sp.proxyUsername || "").trim(),
   };
+  if (isMultiloginProxyHost(host)) {
+    return { ...base, life: 'unknown', state: 'US/UK' };
+  }
+  return base;
 }
 
 /** Browser provider list row → Profile */
@@ -192,9 +222,6 @@ export function profileFromListRow(sp: ProviderListRow): Profile {
     fingerprint = unknownFingerprint(os);
   }
 
-  const hasSnapshot = !!(snap?.proxy && snap?.fingerprint);
-  const hasProviderProxy = !!hintedProxy;
-  const hasUa = !!uaHint;
   const st = mapListStatus(sp.status);
 
   return {
@@ -210,7 +237,6 @@ export function profileFromListRow(sp: ProviderListRow): Profile {
     envId: sp.id,
     ip: sp.debugPort ? `debug:${sp.debugPort}` : undefined,
     browserType: sp.browserType,
-    proxyFingerprintPlaceholder: !hasSnapshot && !hasProviderProxy && !hasUa,
   };
 }
 
@@ -220,8 +246,21 @@ export function saveSnapshotFromCreateFull(
   os: OS,
   data: { proxy?: Record<string, unknown>; fingerprint?: Partial<FingerprintConfig> | null }
 ) {
-  if (!data?.proxy || !data?.fingerprint) return;
-  const proxy = proxyFromBackendCreate(data.proxy as Parameters<typeof proxyFromBackendCreate>[0]);
+  if (!data?.fingerprint) return;
+  const raw = data.proxy as Record<string, unknown> | undefined;
+  let proxy: ProxyConfig;
+  if (raw?.type === 'multilogin_residential') {
+    proxy = proxyFromBackendCreate({
+      type: 'multilogin_residential',
+      country: String(raw.country || 'us'),
+      server: String(raw.server || raw.host || 'gate.multilogin.com'),
+      port: Number(raw.port) || 1080,
+    });
+  } else if (raw) {
+    proxy = proxyFromBackendCreate(raw as Parameters<typeof proxyFromBackendCreate>[0]);
+  } else {
+    return;
+  }
   const fingerprint = mergeFingerprint(unknownFingerprint(os), data.fingerprint);
   saveProfileSnapshot(profileId, { proxy, fingerprint });
 }

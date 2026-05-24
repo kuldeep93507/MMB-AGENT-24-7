@@ -18,6 +18,8 @@ import {
   fetchConcurrency,
   fetchScheduleProgress,
 } from '../utils/scheduleApi';
+import { notifyScheduleComplete, notifyScheduleError } from '../services/notifications';
+import { shouldNotifyBrowser } from '../utils/notificationPrefs';
 import Step2Videos from './scheduler/Step2Videos';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -98,6 +100,25 @@ function enrichScheduleForServer(schedule: Schedule, profiles: Profile[]): Sched
   };
 }
 
+function formatCountdown(ms: number) {
+  if (ms <= 0) return '00:00:00';
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const sec = Math.floor((ms % 60000) / 1000);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+function formatRunAt(ts: number) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString(undefined, {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MAIN COMPONENT
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -107,6 +128,7 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
   const schedulesRef = useRef(schedules);
   useEffect(() => { schedulesRef.current = schedules; }, [schedules]);
   const handleRunRef = useRef<(id: string) => Promise<void>>(async () => {});
+  const pollingScheduleIds = useRef<Set<string>>(new Set());
   const [view, setView] = useState<'list' | 'create'>('list');
   const [editId, setEditId] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -118,8 +140,14 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
       const remote = await fetchSchedulesFromServer();
       if (cancelled) return;
       if (remote && remote.length > 0) {
-        setSchedules(remote as Schedule[]);
-        saveSchedulesLocal(remote as Schedule[]);
+        const list = remote as Schedule[];
+        setSchedules(list);
+        saveSchedulesLocal(list);
+        for (const s of list) {
+          if (s.status === 'scheduled' && s.scheduledTime > Date.now()) {
+            void setServerScheduleTimer(enrichScheduleForServer(s, profiles));
+          }
+        }
       } else if (schedules.length > 0) {
         void syncSchedulesToServer(schedules);
       }
@@ -158,6 +186,10 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
         const active = stats.running + stats.waiting;
         if (active === 0 && stats.total > 0) {
           clearInterval(interval);
+          const scheduleName = schedulesRef.current.find(s => s.id === id)?.name || 'Schedule';
+          if (shouldNotifyBrowser('onScheduleComplete')) {
+            notifyScheduleComplete(scheduleName);
+          }
           setSchedules(prev => prev.map(s => s.id === id ? {
             ...s,
             status: 'completed',
@@ -240,6 +272,7 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
       if (!res.ok || !data.success) {
         const err = data.error || `HTTP ${res.status}`;
         void postActivityLog('error', `Scheduler "${schedule.name}" failed: ${err}`, { source: 'scheduler' });
+        if (shouldNotifyBrowser('onScheduleError')) notifyScheduleError(schedule.name, err);
         setSchedules(prev => prev.map(s => s.id === id ? { ...s, status: 'failed', lastRunError: err } : s));
         return;
       }
@@ -250,6 +283,7 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
     } catch (e) {
       const err = e instanceof Error ? e.message : 'Network error';
       void postActivityLog('error', `Scheduler "${schedule.name}" network error: ${err}`, { source: 'scheduler' });
+      if (shouldNotifyBrowser('onScheduleError')) notifyScheduleError(schedule.name, err);
       setSchedules(prev => prev.map(s => s.id === id ? { ...s, status: 'failed', lastRunError: err } : s));
       return;
     }
@@ -261,15 +295,12 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
     handleRunRef.current = handleRun;
   }, [handleRun]);
 
-  // Auto-run scheduled/countdown schedules
+  // Auto-run countdown schedules (client-side). Fixed time uses server timer.
   useEffect(() => {
     const toRun = schedules.filter(s => {
       if (s.status === 'countdown' && s.startedAt) {
         const runAt = s.startedAt + s.countdownMinutes * 60000;
         return now >= runAt;
-      }
-      if (s.status === 'scheduled' && s.scheduledTime) {
-        return now >= s.scheduledTime;
       }
       return false;
     });
@@ -277,6 +308,38 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
       toRun.forEach(s => { void handleRunRef.current(s.id); });
     }
   }, [now, schedules]);
+
+  // When server starts a scheduled run, sync UI to running
+  useEffect(() => {
+    const t = setInterval(async () => {
+      const list = schedulesRef.current;
+      const due = list.filter(s => s.status === 'scheduled' && s.scheduledTime > 0 && s.scheduledTime <= Date.now());
+      for (const s of due) {
+        const stats = await fetchScheduleProgress(s.selectedProfiles);
+        if (!stats || stats.total === 0) continue;
+        const active = stats.running + stats.waiting;
+        if (active > 0) {
+          setSchedules(prev => prev.map(x => x.id === s.id ? {
+            ...x,
+            status: 'running',
+            lastRun: Date.now(),
+            progress: { total: stats.total, done: stats.done, failed: stats.error },
+          } : x));
+          if (!pollingScheduleIds.current.has(s.id)) {
+            pollingScheduleIds.current.add(s.id);
+            pollStatus(s.id, s.selectedProfiles);
+          }
+        } else if (stats.done + stats.error >= stats.total) {
+          setSchedules(prev => prev.map(x => x.id === s.id ? {
+            ...x,
+            status: 'completed',
+            progress: { total: stats.total, done: stats.done, failed: stats.error },
+          } : x));
+        }
+      }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [pollStatus]);
 
   const handleStop = async (id: string) => {
     try {
@@ -286,6 +349,8 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
         body: JSON.stringify({ scheduleId: id }),
       });
     } catch {}
+    void cancelServerScheduleTimer(id);
+    pollingScheduleIds.current.delete(id);
     setSchedules(prev => prev.map(s => s.id === id ? { ...s, status: 'idle' } : s));
   };
 
@@ -344,13 +409,16 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
     input.click();
   };
 
+  const handleCancelWait = (id: string) => {
+    void cancelServerScheduleTimer(id);
+    setSchedules(prev => prev.map(s => s.id === id ? { ...s, status: 'idle', startedAt: null } : s));
+  };
+
   const handleStartCountdown = (id: string) => {
     setSchedules(prev => prev.map(s => s.id === id ? { ...s, status: 'countdown', startedAt: Date.now() } : s));
   };
 
-  const handleCancelCountdown = (id: string) => {
-    setSchedules(prev => prev.map(s => s.id === id ? { ...s, status: 'idle', startedAt: null } : s));
-  };
+  const handleCancelCountdown = handleCancelWait;
 
   return (
     <div className="flex flex-col h-full">
@@ -381,10 +449,23 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
           existing={editId ? schedules.find(s => s.id === editId) || null : null}
           onSave={async (schedule) => {
             let finalStatus: Schedule['status'] = 'idle';
+            let startedAt: number | null = schedule.startedAt;
             if (schedule.runMode === 'scheduled' && schedule.scheduledTime > Date.now()) {
               finalStatus = 'scheduled';
+              startedAt = null;
+            } else if (schedule.runMode === 'countdown' && schedule.countdownMinutes > 0) {
+              finalStatus = 'countdown';
+              startedAt = Date.now();
+            } else {
+              startedAt = null;
             }
-            const savedSchedule = enrichScheduleForServer({ ...schedule, status: finalStatus }, profiles);
+            const countdownMinutes = clampCountdownMinutes(schedule.countdownMinutes);
+            const savedSchedule = enrichScheduleForServer({
+              ...schedule,
+              countdownMinutes,
+              status: finalStatus,
+              startedAt,
+            }, profiles);
             setSchedules(prev => {
               const exists = prev.find(s => s.id === savedSchedule.id);
               return exists ? prev.map(s => s.id === savedSchedule.id ? savedSchedule : s) : [...prev, savedSchedule];
@@ -542,20 +623,15 @@ function ScheduleCard({ schedule: s, profiles: _profiles, channels: _channels, n
   onEdit: () => void; onRun: () => void; onStop: () => void; onDelete: () => void;
   onDuplicate: () => void; onStartCountdown: () => void; onCancelCountdown: () => void;
 }) {
-  // Countdown timer
   const countdownRemaining = s.status === 'countdown' && s.startedAt
     ? Math.max(0, (s.startedAt + s.countdownMinutes * 60000) - now)
     : 0;
 
-  const formatCountdown = (ms: number) => {
-    if (ms <= 0) return '00:00:00';
-    const h = Math.floor(ms / 3600000);
-    const m = Math.floor((ms % 3600000) / 60000);
-    const sec = Math.floor((ms % 60000) / 1000);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
-  };
+  const scheduledRemaining = s.status === 'scheduled' && s.scheduledTime
+    ? Math.max(0, s.scheduledTime - now)
+    : 0;
 
-  const statusConfig: Record<string, { color: string; bg: string; label: string; icon: any }> = {
+  const statusConfig: Record<string, { color: string; bg: string; label: string; icon: typeof Clock }> = {
     idle: { color: 'text-gray-400', bg: 'bg-gray-800 border-gray-700', label: 'Ready', icon: Clock },
     running: { color: 'text-green-400', bg: 'bg-green-900/20 border-green-700/30', label: 'Running', icon: Loader },
     completed: { color: 'text-blue-400', bg: 'bg-blue-900/20 border-blue-700/30', label: 'Completed', icon: CheckCircle },
@@ -574,7 +650,7 @@ function ScheduleCard({ schedule: s, profiles: _profiles, channels: _channels, n
     <div className={`border rounded-2xl p-5 transition-all ${st.bg}`}>
       <div className="flex items-start gap-4">
         {/* Status Icon */}
-        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${s.status === 'running' ? 'bg-green-600 animate-pulse' : s.status === 'countdown' ? 'bg-yellow-600 animate-pulse' : 'bg-gray-800'}`}>
+        <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${s.status === 'running' ? 'bg-green-600 animate-pulse' : s.status === 'countdown' ? 'bg-yellow-600 animate-pulse' : s.status === 'scheduled' ? 'bg-purple-600 animate-pulse' : 'bg-gray-800'}`}>
           <StatusIcon size={18} className="text-white" />
         </div>
 
@@ -594,11 +670,28 @@ function ScheduleCard({ schedule: s, profiles: _profiles, channels: _channels, n
 
           {/* Countdown Timer */}
           {s.status === 'countdown' && (
-            <div className="flex items-center gap-3 mt-2">
-              <div className="bg-yellow-900/40 border border-yellow-600/40 rounded-xl px-4 py-2">
-                <span className="text-yellow-400 font-mono text-2xl font-bold">{formatCountdown(countdownRemaining)}</span>
+            <div className="flex flex-col gap-1 mt-2">
+              <div className="flex items-center gap-3">
+                <div className="bg-yellow-900/40 border border-yellow-600/40 rounded-xl px-4 py-2">
+                  <span className="text-yellow-400 font-mono text-2xl font-bold">{formatCountdown(countdownRemaining)}</span>
+                </div>
+                <span className="text-yellow-400 text-xs">Runs at {formatRunAt((s.startedAt || now) + s.countdownMinutes * 60000)}</span>
               </div>
-              <span className="text-yellow-400 text-xs">Auto-run in {Math.ceil(countdownRemaining / 60000)} min</span>
+            </div>
+          )}
+
+          {/* Scheduled Timer */}
+          {s.status === 'scheduled' && s.scheduledTime > 0 && (
+            <div className="flex flex-col gap-1 mt-2">
+              <div className="flex items-center gap-3">
+                <div className="bg-purple-900/40 border border-purple-600/40 rounded-xl px-4 py-2">
+                  <span className="text-purple-300 font-mono text-2xl font-bold">{formatCountdown(scheduledRemaining)}</span>
+                </div>
+                <div className="text-xs text-purple-300/90">
+                  <div>Chalega: <span className="text-purple-200 font-medium">{formatRunAt(s.scheduledTime)}</span></div>
+                  {s.repeatEnabled && <div className="text-purple-400/80 mt-0.5">Repeat: {s.repeatInterval}</div>}
+                </div>
+              </div>
             </div>
           )}
 
@@ -632,11 +725,21 @@ function ScheduleCard({ schedule: s, profiles: _profiles, channels: _channels, n
               <button onClick={onRun} className="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-xl text-sm font-semibold transition-all flex items-center gap-1.5">
                 <Play size={14} /> Run Now
               </button>
-              {s.countdownMinutes > 0 && (
+              {s.runMode === 'countdown' && s.countdownMinutes > 0 && (
                 <button onClick={onStartCountdown} className="bg-yellow-600 hover:bg-yellow-500 text-white px-3 py-2 rounded-xl text-sm font-medium transition-all flex items-center gap-1.5">
                   <Timer size={14} /> {s.countdownMinutes}m
                 </button>
               )}
+            </>
+          )}
+          {s.status === 'scheduled' && (
+            <>
+              <button onClick={onRun} className="bg-green-600 hover:bg-green-500 text-white px-3 py-2 rounded-xl text-sm font-semibold transition-all flex items-center gap-1.5">
+                <Play size={14} /> Run Now
+              </button>
+              <button onClick={onCancelCountdown} className="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-xl text-sm font-medium transition-all">
+                Cancel
+              </button>
             </>
           )}
           {s.status === 'countdown' && (
@@ -676,7 +779,7 @@ function CreateSchedule({ profiles, channels, getVideos, existing, onSave, onBac
     id: genId(), name: '', selectedProfiles: [], selectedChannels: [],
     assignmentMode: 'same-all', sameForAll: [], perProfile: [],
     profileDelayMin: 5, profileDelayMax: 20, tabDelayMin: 30, tabDelayMax: 120,
-    runMode: 'manual', countdownMinutes: 60, scheduledTime: 0,
+    runMode: 'manual', countdownMinutes: 15, scheduledTime: 0,
     repeatEnabled: false, repeatInterval: '6hr',
     status: 'idle', createdAt: Date.now(), lastRun: null, startedAt: null,
     progress: { total: 0, done: 0, failed: 0 },
@@ -892,6 +995,10 @@ function Step1Setup({ schedule, profiles, channels, onChange }: { schedule: Sche
 }
 
 // ━━━ STEP 3: Timer & Run Mode ━━━
+function clampCountdownMinutes(n: number) {
+  return Math.max(1, Math.min(10080, Math.round(Number(n)) || 1));
+}
+
 function Step3Timer({ schedule, onChange }: { schedule: Schedule; onChange: (s: Schedule) => void }) {
   return (
     <div className="space-y-6">
@@ -925,10 +1032,10 @@ function Step3Timer({ schedule, onChange }: { schedule: Schedule; onChange: (s: 
       {/* Countdown Options */}
       {schedule.runMode === 'countdown' && (
         <div className="bg-yellow-900/20 border border-yellow-700/30 rounded-xl p-4">
-          <label className="text-yellow-400 font-semibold text-sm block mb-3">⏱️ Run after how many minutes?</label>
-          <div className="grid grid-cols-6 gap-2">
-            {[15, 30, 60, 120, 180, 360].map(min => (
-              <button key={min} onClick={() => onChange({ ...schedule, countdownMinutes: min })}
+          <label className="text-yellow-400 font-semibold text-sm block mb-3">⏱️ Run after how many minutes? (min 1)</label>
+          <div className="grid grid-cols-4 sm:grid-cols-8 gap-2">
+            {[1, 5, 15, 30, 60, 120, 180, 360].map(min => (
+              <button key={min} type="button" onClick={() => onChange({ ...schedule, countdownMinutes: min })}
                 className={`py-2.5 rounded-xl border text-sm font-medium transition-all ${schedule.countdownMinutes === min ? 'border-yellow-500 bg-yellow-600 text-white' : 'border-gray-700 bg-gray-800 text-gray-400 hover:border-gray-600'}`}>
                 {min < 60 ? `${min}m` : `${min / 60}h`}
               </button>
@@ -936,11 +1043,12 @@ function Step3Timer({ schedule, onChange }: { schedule: Schedule; onChange: (s: 
           </div>
           <div className="mt-3 flex items-center gap-2">
             <span className="text-xs text-gray-400">Custom:</span>
-            <input type="number" value={schedule.countdownMinutes} onChange={(e) => onChange({ ...schedule, countdownMinutes: Number(e.target.value) })}
+            <input type="number" min={1} max={10080} step={1} value={schedule.countdownMinutes}
+              onChange={(e) => onChange({ ...schedule, countdownMinutes: clampCountdownMinutes(Number(e.target.value)) })}
               className="w-20 bg-gray-900 border border-gray-700 rounded-lg px-3 py-1.5 text-white text-sm focus:outline-none" />
             <span className="text-xs text-gray-400">minutes</span>
           </div>
-          <p className="text-xs text-yellow-300/70 mt-2">💡 Save karke list mein timer button click karo — countdown shuru hoga</p>
+          <p className="text-xs text-yellow-300/70 mt-2">Save karte hi countdown shuru ho jayega — live timer list mein dikhega.</p>
         </div>
       )}
 
@@ -950,8 +1058,11 @@ function Step3Timer({ schedule, onChange }: { schedule: Schedule; onChange: (s: 
           <label className="text-purple-400 font-semibold text-sm block mb-3">📅 Run at specific time</label>
           
           {/* Quick Time Buttons */}
-          <div className="grid grid-cols-4 gap-2 mb-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
             {[
+              { label: '1 min', ms: 60 * 1000 },
+              { label: '5 min', ms: 5 * 60 * 1000 },
+              { label: '15 min', ms: 15 * 60 * 1000 },
               { label: '1 hour', ms: 60 * 60 * 1000 },
               { label: '3 hours', ms: 3 * 60 * 60 * 1000 },
               { label: '6 hours', ms: 6 * 60 * 60 * 1000 },
@@ -985,7 +1096,7 @@ function Step3Timer({ schedule, onChange }: { schedule: Schedule; onChange: (s: 
               {schedule.scheduledTime > Date.now() && ` (in ${Math.round((schedule.scheduledTime - Date.now()) / 60000)} min)`}
             </p>
           )}
-          <p className="text-xs text-purple-300/70 mt-2">💡 Save karte hi server timer set ho jayega — app band ho to bhi run ho sakta hai (backend chalu hona chahiye).</p>
+          <p className="text-xs text-purple-300/70 mt-2">Save karte hi server timer set ho jayega — kitna time baki hai card pe dikhega (backend chalu hona chahiye).</p>
         </div>
       )}
 

@@ -13,11 +13,11 @@ import AnalyticsPage from './components/AnalyticsPage';
 import CommentTemplatesPage from './components/CommentTemplatesPage';
 import VideoShufflePage from './components/VideoShufflePage';
 import BacklinkPoolPage from './components/BacklinkPoolPage';
-import ProxyHealthPage from './components/ProxyHealthPage';
 import SplashScreen from './components/SplashScreen';
 import { useStore } from './store/useStore';
 import { useChannelStore } from './store/useChannelStore';
-import type { OS, TaskType } from './types';
+import { isMultiloginProxyHost } from './utils/profileAdapter';
+import type { OS } from './types';
 
 export default function App() {
   // Splash screen — show only once per session
@@ -38,7 +38,7 @@ export default function App() {
     deleteSelectedProfiles, recreateSelectedProfiles, exportProfileConfigs,
     recreatingIds, loading, fetchProfiles,
     toggleSelect, selectAll, deselectAll, startSelected, stopSelected,
-    addJob, retryJob, clearLogs, renewProxy,
+    retryJob, clearLogs, renewProxy,
   } = useStore();
 
   const channelStore = useChannelStore();
@@ -52,6 +52,7 @@ export default function App() {
     const interval = setInterval(() => {
       const now = Date.now();
       profiles.forEach(p => {
+        if (isMultiloginProxyHost(p.proxy.server)) return;
         if (p.status === 'stopped' && p.proxy.expiresAt > 0 && p.proxy.expiresAt < now) {
           renewProxy(p.id);
         }
@@ -60,10 +61,18 @@ export default function App() {
     return () => clearInterval(interval);
   }, [profiles, renewProxy]);
 
+  useEffect(() => {
+    if (activeTab === 'proxy-health') {
+      setActiveTab('dashboard');
+    } else if (activeTab === 'engagement' || activeTab === 'performance' || activeTab === 'orchestrator-log' || activeTab === 'video-manager' || activeTab === 'yt-agents') {
+      setActiveTab('channels');
+    }
+  }, [activeTab, setActiveTab]);
+
   const renderPage = () => {
     switch (activeTab) {
       case 'dashboard':
-        return <Dashboard profiles={profiles} setActiveTab={setActiveTab} />;
+        return <Dashboard profiles={profiles} setActiveTab={setActiveTab} onRefreshProfiles={() => fetchProfiles()} />;
       case 'profiles':
         return (
           <ProfilesPage
@@ -82,7 +91,6 @@ export default function App() {
             onStartSelected={startSelected}
             onStopSelected={stopSelected}
             onRenewProxy={renewProxy}
-            onAddJob={(profileId: string, taskType: TaskType, details?: string) => addJob(profileId, taskType, details)}
             onRefreshProfiles={() => fetchProfiles()}
             onDeleteSelected={deleteSelectedProfiles}
             onRecreateSelected={recreateSelectedProfiles}
@@ -112,16 +120,15 @@ export default function App() {
             togglePlaylist={channelStore.togglePlaylist}
             toasts={channelStore.toasts}
             dismissToast={channelStore.dismissToast}
+            forceSyncToServer={channelStore.forceSyncToServer}
           />
         );
-      case 'proxy-health':
-        return <ProxyHealthPage profiles={profiles} onRenewProxy={renewProxy} />;
       case 'jobs':
         return <JobQueuePage jobs={jobs} onRetry={retryJob} />;
       case 'scheduler':
         return <SchedulerPage profiles={profiles} channels={channelStore.channels} getVideos={channelStore.getVideos} />;
       case 'video-shuffle':
-        return <VideoShufflePage profiles={profiles} channels={channelStore.channels} getVideos={channelStore.getVideos} />;
+        return <VideoShufflePage profiles={profiles} channels={channelStore.channels} getVideos={channelStore.getVideos} onRefreshProfiles={() => fetchProfiles()} />;
       case 'backlinks':
         return <BacklinkPoolPage profiles={profiles} />;
       case 'manual':

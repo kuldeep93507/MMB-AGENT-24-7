@@ -106,9 +106,12 @@ export default function AnalyticsPage({ profiles, sites, readHistory, rateLimits
 
   // Per-site stats — use URL domain matching as fallback (siteId not always saved in history)
   const perSite = sites.map(s => {
-    const liveS = liveData?.perSite?.[s.id];
     let domain = '';
     try { domain = new URL(s.url).hostname.replace(/^www\./, ''); } catch {}
+    // Try by s.id first, then by hostname (backend saves by hostname)
+    const liveS = liveData?.perSite?.[s.id]
+      || (domain ? liveData?.perSite?.[domain] : undefined)
+      || (domain ? liveData?.perSite?.['www.' + domain] : undefined);
     const matchHistory = domain
       ? filtered.filter(r => {
           try { return new URL(r.articleUrl).hostname.replace(/^www\./, '') === domain; } catch { return r.siteId === s.id; }

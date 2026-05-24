@@ -10,7 +10,7 @@ const LOG_FILE = path.resolve(__dirname, '..', 'activity_logs.json');
 const MAX_ENTRIES = 2000;
 const VALID_LEVELS = new Set(['info', 'warn', 'error', 'success']);
 const VALID_SOURCES = new Set([
-  'profile', 'worker', 'scheduler', 'shuffle', 'backlink', 'manual', 'settings', 'system',
+  'profile', 'worker', 'scheduler', 'shuffle', 'backlink', 'manual', 'settings', 'system', 'yt-agent',
 ]);
 
 let entries = [];
@@ -107,7 +107,13 @@ function getLogs(opts = {}) {
         (e.profileName && e.profileName.toLowerCase().includes(search)),
     );
   }
-  return { entries: list.slice(0, limit), total: entries.length };
+
+  const stats = { info: 0, warn: 0, error: 0, success: 0 };
+  for (const e of entries) {
+    if (stats[e.level] != null) stats[e.level]++;
+  }
+
+  return { entries: list.slice(0, limit), total: entries.length, stats, filtered: list.length };
 }
 
 function clear() {

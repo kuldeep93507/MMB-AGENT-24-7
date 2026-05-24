@@ -41,17 +41,49 @@ function roundTo4Decimals(value) {
 }
 
 /**
+ * Build a uniqueness signature — any matching signature = duplicate profile.
+ * @param {object} config
+ * @returns {string}
+ */
+function fingerprintSignature(config) {
+  if (!config) return '';
+  const fontsKey = Array.isArray(config.fonts)
+    ? `${config.fonts.length}:${config.fonts.slice(0, 3).join(',')}`
+    : '';
+  const media = config.mediaDevices || {};
+  return [
+    config.userAgent || '',
+    config.resolution || '',
+    config.pixelRatio ?? '',
+    config.timezone || '',
+    config.language || '',
+    config.cpu ?? '',
+    config.ram ?? '',
+    config.battery ?? '',
+    config.canvasNoise?.seed || '',
+    config.webGLNoise?.seed || '',
+    config.audioContextNoise?.seed || '',
+    config.webGLMeta?.vendor || '',
+    config.webGLMeta?.renderer || '',
+    roundTo4Decimals(config.geolocation?.lat || 0),
+    roundTo4Decimals(config.geolocation?.lng || 0),
+    media.audioInputs ?? '',
+    media.videoInputs ?? '',
+    media.audioOutputs ?? '',
+    fontsKey,
+  ].join('|');
+}
+
+/**
  * Extract the fingerprint comparison key from a fingerprint config.
- * The key is the combination of (userAgent, resolution, webGLMeta vendor+renderer, geolocation).
- * 
  * @param {object} config - Fingerprint config object
- * @returns {{ userAgent: string, resolution: string, webGLKey: string, geoKey: string }}
+ * @returns {{ userAgent: string, resolution: string, webGLKey: string, geoKey: string, signature: string }}
  */
 function extractComparisonFields(config) {
   const userAgent = config.userAgent || '';
   const resolution = config.resolution || '';
   const webGLKey = (config.webGLMeta ? (config.webGLMeta.vendor || '') + (config.webGLMeta.renderer || '') : '');
-  
+
   let geoLat = 0;
   let geoLng = 0;
   if (config.geolocation) {
@@ -60,7 +92,16 @@ function extractComparisonFields(config) {
   }
   const geoKey = `${geoLat},${geoLng}`;
 
-  return { userAgent, resolution, webGLKey, geoKey };
+  return {
+    userAgent,
+    resolution,
+    webGLKey,
+    geoKey,
+    signature: fingerprintSignature(config),
+    canvasSeed: config.canvasNoise?.seed || '',
+    webglSeed: config.webGLNoise?.seed || '',
+    audioSeed: config.audioContextNoise?.seed || '',
+  };
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -103,7 +144,27 @@ class UniquenessValidator {
 
       const existingFields = extractComparisonFields(profile.fingerprint);
 
-      // Check if ALL four fields match (combination uniqueness)
+      // Full signature match (canvas/webgl/audio seeds + UA + GPU + screen + media)
+      if (newFields.signature && newFields.signature === existingFields.signature) {
+        return {
+          unique: false,
+          conflictField: 'fingerprint_signature',
+          conflictProfileId: profile.id || profile._id || undefined,
+        };
+      }
+
+      // Individual seed collision (must be globally unique per profile)
+      if (newFields.canvasSeed && newFields.canvasSeed === existingFields.canvasSeed) {
+        return { unique: false, conflictField: 'canvasNoise.seed', conflictProfileId: profile.id || profile._id };
+      }
+      if (newFields.webglSeed && newFields.webglSeed === existingFields.webglSeed) {
+        return { unique: false, conflictField: 'webGLNoise.seed', conflictProfileId: profile.id || profile._id };
+      }
+      if (newFields.audioSeed && newFields.audioSeed === existingFields.audioSeed) {
+        return { unique: false, conflictField: 'audioContextNoise.seed', conflictProfileId: profile.id || profile._id };
+      }
+
+      // Legacy combination check (UA + resolution + WebGL + geo all same)
       const userAgentMatch = newFields.userAgent === existingFields.userAgent;
       const resolutionMatch = newFields.resolution === existingFields.resolution;
       const webGLMatch = newFields.webGLKey === existingFields.webGLKey;
@@ -167,4 +228,6 @@ const uniquenessValidator = new UniquenessValidator();
 
 module.exports = uniquenessValidator;
 module.exports.UniquenessValidator = UniquenessValidator;
+module.exports.fingerprintSignature = fingerprintSignature;
+module.exports.extractComparisonFields = extractComparisonFields;
 module.exports.ACTIVE_STATUSES = ACTIVE_STATUSES;

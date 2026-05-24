@@ -24,9 +24,33 @@
  */
 
 const { providerFactory } = require('../providers/ProviderFactory.cjs');
+const fs = require('fs');
+const path = require('path');
+const { resolveCreateProxyType } = require('./proxyType.cjs');
 
-// Timeout for stop operations (30 seconds)
-const STOP_TIMEOUT_MS = 30000;
+function loadRecreateProxyType() {
+  try {
+    const settingsFile = path.join(__dirname, '..', '..', 'user-settings.json');
+    if (fs.existsSync(settingsFile)) {
+      return resolveCreateProxyType(null, JSON.parse(fs.readFileSync(settingsFile, 'utf8')).ytProxyType);
+    }
+  } catch { /* ignore */ }
+  return 'smartproxy';
+}
+
+function loadMultiloginPurgeOnDelete() {
+  try {
+    const settingsFile = path.join(__dirname, '..', '..', 'user-settings.json');
+    if (fs.existsSync(settingsFile)) {
+      const v = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).multiloginPurgeOnDelete;
+      if (v === false || v === 'false') return false;
+    }
+  } catch { /* ignore */ }
+  return true;
+}
+
+// Stop must cover Multilogin sequential launcher attempts (multiple endpoints × ~15s each).
+const STOP_TIMEOUT_MS = Number(process.env.PROFILE_STOP_TIMEOUT_MS) || 120000;
 
 /**
  * @typedef {object} RecreateOptions
@@ -80,6 +104,7 @@ class RecreateHandler {
       cookies,
       statusCallback,
       fingerprintConfig,
+      proxyType,
     } = options;
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -103,10 +128,10 @@ class RecreateHandler {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // Step 3: Stop profile if running (30s timeout)
+    // Step 3: Stop profile if marked running (RecreateHandler timeout must exceed provider's multi-endpoint stop)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     if (currentStatus === 'running') {
-      const stopResult = await this._stopWithTimeout(profileId, browserType);
+      const stopResult = await this._stopWithTimeout(profileId, browserType, options.cdpPort);
 
       if (!stopResult.success) {
         // Stop timeout or failure → abort, restore previous status
@@ -115,7 +140,7 @@ class RecreateHandler {
         }
         return {
           code: -8,
-          message: `Recreate aborted: failed to stop profile within 30 seconds. ${stopResult.error || ''}`.trim(),
+          message: `Recreate aborted: failed to stop profile within ${STOP_TIMEOUT_MS / 1000} seconds. ${stopResult.error || ''}`.trim(),
           data: null,
         };
       }
@@ -147,8 +172,7 @@ class RecreateHandler {
       browserType: browserType,
       cookies: cookies || undefined,
       groupId: originalProfile.groupId || undefined,
-      // Pass fingerprintConfig so recreated profiles respect fingerprint settings.
-      // Without this, fingerprintConfig was silently dropped and profile got random fingerprint.
+      proxyType: proxyType || loadRecreateProxyType(),
       fingerprintConfig: fingerprintConfig || {
         canvas: 'real',
         webrtc: 'real',
@@ -205,22 +229,23 @@ class RecreateHandler {
   }
 
   /**
-   * Stop a profile with a 30-second timeout.
+   * Stop a profile with bounded timeout (default 120s — Multilogin may hit several launcher endpoints sequentially).
    *
    * @param {string} profileId - Profile ID to stop
    * @param {string} browserType - Browser provider type
    * @returns {Promise<{ success: boolean, error?: string }>}
    * @private
    */
-  async _stopWithTimeout(profileId, browserType) {
+  async _stopWithTimeout(profileId, browserType, cdpPort) {
     try {
       const provider = providerFactory.getProvider(browserType);
 
       // Race between stop operation and timeout
-      const stopPromise = provider.stopProfile(profileId);
+      const stopOpts = cdpPort ? { cdpPort } : {};
+      const stopPromise = provider.stopProfile(profileId, stopOpts);
       const timeoutPromise = new Promise((_, reject) => {
         setTimeout(() => {
-          reject(new Error('Stop operation timed out after 30 seconds'));
+          reject(new Error(`Stop operation timed out after ${STOP_TIMEOUT_MS / 1000} seconds`));
         }, STOP_TIMEOUT_MS);
       });
 
@@ -255,7 +280,8 @@ class RecreateHandler {
   async _deleteProfile(profileId, browserType) {
     try {
       const provider = providerFactory.getProvider(browserType);
-      const result = await provider.deleteProfile(profileId);
+      const permanently = browserType === 'multilogin' && loadMultiloginPurgeOnDelete();
+      const result = await provider.deleteProfile(profileId, { permanently });
 
       if (result && result.code === 0) {
         return { success: true };

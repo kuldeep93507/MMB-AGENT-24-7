@@ -17,10 +17,42 @@
 'use strict';
 
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const { providerFactory, VALID_PROVIDERS } = require('./ProviderFactory.cjs');
 const ProfileCreator = require('../services/ProfileCreator.cjs');
 const RecreateHandler = require('../services/RecreateHandler.cjs');
 const { ANDROID_DEVICES } = require('../services/fingerprintData.cjs');
+const { resolveCreateProxyType, isMultiloginProxyType } = require('../services/proxyType.cjs');
+
+function loadSettingsProxyType() {
+  try {
+    const settingsFile = path.join(__dirname, '..', '..', 'user-settings.json');
+    if (fs.existsSync(settingsFile)) {
+      return JSON.parse(fs.readFileSync(settingsFile, 'utf8')).ytProxyType;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function loadMultiloginPurgeOnDelete() {
+  try {
+    const settingsFile = path.join(__dirname, '..', '..', 'user-settings.json');
+    if (fs.existsSync(settingsFile)) {
+      const v = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).multiloginPurgeOnDelete;
+      if (v === false || v === 'false') return false;
+    }
+  } catch { /* ignore */ }
+  return true;
+}
+
+function trashNotSupported(res, providerName) {
+  return res.status(400).json({
+    code: -5,
+    message: `Trash management is only supported for Multilogin (got "${providerName}")`,
+    data: null,
+  });
+}
 
 const router = express.Router();
 
@@ -154,7 +186,16 @@ router.post('/api/profiles/create', async (req, res) => {
   if (!provider) return;
 
   try {
-    const result = await provider.createProfile(req.body);
+    const body = { ...(req.body || {}) };
+    if (body.proxy && isMultiloginProxyType(body.proxy.type)) {
+      body.proxy = {
+        type: 'multilogin_residential',
+        country: body.proxy.country || 'us',
+        city: body.proxy.city,
+        region: body.proxy.region,
+      };
+    }
+    const result = await provider.createProfile(body);
 
     const profileId = result.data?.id || result.data?.profileId || null;
     if (result.code === 0) {
@@ -243,13 +284,15 @@ router.post('/api/profiles/delete', async (req, res) => {
   const provider = resolveProvider(req, res);
   if (!provider) return;
 
-  const { profileId } = req.body || {};
+  const { profileId, permanently } = req.body || {};
+  const forcePermanent = permanently === true
+    || (provider.name === 'multilogin' && loadMultiloginPurgeOnDelete());
 
   try {
-    const result = await provider.deleteProfile(profileId);
+    const result = await provider.deleteProfile(profileId, { permanently: forcePermanent });
 
     if (result.code === 0) {
-      logOperation(provider.name, 'delete', profileId, 'success');
+      logOperation(provider.name, 'delete', profileId, 'success', forcePermanent ? 'permanent' : 'trash');
       res.status(200).json(result);
     } else {
       logOperation(provider.name, 'delete', profileId, 'error', `message="${result.message}"`);
@@ -258,6 +301,106 @@ router.post('/api/profiles/delete', async (req, res) => {
   } catch (err) {
     const errorResult = provider.handleError(err);
     logOperation(provider.name, 'delete', profileId, 'error', `message="${errorResult.message}"`);
+    res.status(502).json(errorResult);
+  }
+});
+
+/**
+ * GET /api/profiles/trash
+ * List Multilogin trash profiles.
+ * Query: ?provider=multilogin&pageNo=1&pageSize=50
+ */
+router.get('/api/profiles/trash', async (req, res) => {
+  req._profileOperation = 'trash-list';
+  const provider = resolveProvider(req, res);
+  if (!provider) return;
+
+  if (typeof provider.listTrashProfiles !== 'function') {
+    return trashNotSupported(res, provider.name);
+  }
+
+  const pageNo = parseInt(req.query.pageNo, 10) || 1;
+  const pageSize = parseInt(req.query.pageSize, 10) || 50;
+
+  try {
+    const result = await provider.listTrashProfiles(pageNo, pageSize);
+    if (result.code === 0) {
+      logOperation(provider.name, 'trash-list', null, 'success', `count=${result.data?.profiles?.length || 0}`);
+      res.status(200).json(result);
+    } else {
+      logOperation(provider.name, 'trash-list', null, 'error', `message="${result.message}"`);
+      res.status(502).json(result);
+    }
+  } catch (err) {
+    const errorResult = provider.handleError(err);
+    logOperation(provider.name, 'trash-list', null, 'error', `message="${errorResult.message}"`);
+    res.status(502).json(errorResult);
+  }
+});
+
+/**
+ * POST /api/profiles/trash/delete
+ * Permanently delete profile(s) from Multilogin trash.
+ * Query: ?provider=multilogin
+ * Body: { profileIds: string[] }
+ */
+router.post('/api/profiles/trash/delete', async (req, res) => {
+  req._profileOperation = 'trash-delete';
+  const provider = resolveProvider(req, res);
+  if (!provider) return;
+
+  if (typeof provider.deleteProfilesPermanently !== 'function') {
+    return trashNotSupported(res, provider.name);
+  }
+
+  const { profileIds } = req.body || {};
+  const ids = Array.isArray(profileIds) ? profileIds.filter(Boolean) : [];
+  if (!ids.length) {
+    return res.status(400).json({ code: -5, message: 'profileIds array required', data: null });
+  }
+
+  try {
+    const result = await provider.deleteProfilesPermanently(ids);
+    if (result.code === 0) {
+      logOperation(provider.name, 'trash-delete', ids.join(','), 'success');
+      res.status(200).json(result);
+    } else {
+      logOperation(provider.name, 'trash-delete', ids.join(','), 'error', `message="${result.message}"`);
+      res.status(502).json(result);
+    }
+  } catch (err) {
+    const errorResult = provider.handleError(err);
+    logOperation(provider.name, 'trash-delete', ids.join(','), 'error', `message="${errorResult.message}"`);
+    res.status(502).json(errorResult);
+  }
+});
+
+/**
+ * POST /api/profiles/trash/empty
+ * Permanently delete ALL profiles in Multilogin trash.
+ * Query: ?provider=multilogin
+ */
+router.post('/api/profiles/trash/empty', async (req, res) => {
+  req._profileOperation = 'trash-empty';
+  const provider = resolveProvider(req, res);
+  if (!provider) return;
+
+  if (typeof provider.emptyTrash !== 'function') {
+    return trashNotSupported(res, provider.name);
+  }
+
+  try {
+    const result = await provider.emptyTrash();
+    if (result.code === 0) {
+      logOperation(provider.name, 'trash-empty', null, 'success', `deleted=${result.data?.deleted || 0}`);
+      res.status(200).json(result);
+    } else {
+      logOperation(provider.name, 'trash-empty', null, 'error', `message="${result.message}"`);
+      res.status(502).json(result);
+    }
+  } catch (err) {
+    const errorResult = provider.handleError(err);
+    logOperation(provider.name, 'trash-empty', null, 'error', `message="${errorResult.message}"`);
     res.status(502).json(errorResult);
   }
 });
@@ -349,7 +492,7 @@ function mapErrorCodeToHttpStatus(code) {
  * proxyType: 'smartproxy' (default) | 'multilogin' | 'none'
  */
 router.post('/api/profiles/create-full', async (req, res) => {
-  const { name, os, browserType, proxyLife, cookies, groupId, proxyType, fingerprintConfig, profileMode, androidDevice } = req.body || {};
+  const { name, os, browserType, proxyLife, cookies, groupId, proxyType, proxyCountry, fingerprintConfig, profileMode, androidDevice } = req.body || {};
 
   // Basic request body validation
   if (!os || !browserType) {
@@ -362,11 +505,19 @@ router.post('/api/profiles/create-full', async (req, res) => {
   }
 
   // Log which mode is being used
-  const resolvedProxyType = proxyType || 'smartproxy';
+  const resolvedProxyType = resolveCreateProxyType(proxyType, loadSettingsProxyType());
+  if (resolvedProxyType === 'none') {
+    return res.status(400).json({
+      code: -5,
+      message: 'Proxy required — US/UK proxy only. Real IP (India) is not allowed.',
+      data: null,
+    });
+  }
   const resolvedProfileMode = profileMode || 'cloud';
   const deviceLog = (os === 'Android' && androidDevice) ? ` androidDevice="${androidDevice}"` : '';
+  const countryLog = resolvedProxyType === 'multilogin' && proxyCountry ? ` proxyCountry=${proxyCountry}` : '';
   logOperation(browserType, 'create-full', null, 'info',
-    `proxyType=${resolvedProxyType} profileMode=${resolvedProfileMode}${deviceLog}`);
+    `proxyType=${resolvedProxyType} profileMode=${resolvedProfileMode}${deviceLog}${countryLog}`);
 
   try {
     const profileCreator = new ProfileCreator();
@@ -378,6 +529,7 @@ router.post('/api/profiles/create-full', async (req, res) => {
       cookies,
       groupId,
       proxyType: resolvedProxyType,   // 'smartproxy' | 'multilogin' | 'none'
+      proxyCountry: proxyCountry || undefined, // us | gb | uk (Multilogin residential only)
       profileMode: resolvedProfileMode, // 'cloud' (persistent) | 'quick' (local launcher, full fingerprint)
       androidDevice: androidDevice || null, // specific Android device model or null (auto-random)
       fingerprintConfig: fingerprintConfig || {
@@ -415,7 +567,7 @@ router.post('/api/profiles/create-full', async (req, res) => {
  * Body: { profileId, browserType, cookies? }
  */
 router.post('/api/profiles/recreate', async (req, res) => {
-  const { profileId, browserType, cookies, os, name, fingerprintConfig } = req.body || {};
+  const { profileId, browserType, cookies, os, name, fingerprintConfig, proxyType } = req.body || {};
 
   // Basic request body validation
   if (!profileId || !browserType) {
@@ -480,7 +632,7 @@ router.post('/api/profiles/recreate', async (req, res) => {
       preserveName: true,
       originalProfile,
       cookies: cookies || undefined,
-      // BUG FIX: Pass fingerprint config for real values
+      proxyType: resolveCreateProxyType(proxyType, loadSettingsProxyType()),
       fingerprintConfig: fingerprintConfig || {
         canvas: 'real',
         webrtc: 'real',

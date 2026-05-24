@@ -24,6 +24,14 @@ const cookiesService = new MultiloginCookiesService();
 const activityLog = require('./activityLog.cjs');
 const { getApiToken, requireAuth } = require('./apiAuth.cjs');
 const appDataStore = require('./appDataStore.cjs');
+const { agentManager } = require('./agentManager.cjs');
+const { agentHistoryKey } = require('./scheduleEngine.cjs');
+const { notificationService } = require('./notificationService.cjs');
+const { ProfileRecycleManager } = require('./profileRecycleManager.cjs');
+const { restartTrashJanitor, runEmptyTrash } = require('./services/trashManager.cjs');
+const { assignOneProfile } = require('./shuffleEngine.cjs');
+
+const { getServerPort, getMoreloginPort } = require('./utils/config.cjs');
 
 const app = express();
 app.use(cors({
@@ -39,9 +47,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-const PORT = 3100;
-const MORELOGIN_BASE = 'http://127.0.0.1:40000';
-const MORELOGIN_API_KEY = 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e';
+const PORT = getServerPort();
 
 const activeAgents = new Map();
 
@@ -98,11 +104,99 @@ orchestrator.onWorkerDone = (profileId) => {
       return !ws || ws.status === 'done' || ws.status === 'stopped' || ws.status === 'crashed';
     });
     if (allDone) {
-      console.log(`[Orchestrator] Schedule "${entry.schedule?.name}" complete — removing from runningSchedules`);
+      const name = entry.schedule?.name || scheduleId;
+      console.log(`[Orchestrator] Schedule "${name}" complete — removing from runningSchedules`);
+      notificationService.info('Schedule complete', `"${name}" — all profiles finished`).catch(() => {});
       runningSchedules.delete(scheduleId);
     }
   }
 };
+
+function applyYtAgentSettingsFromApp(s) {
+  agentManager.updateSettings({
+    maxTotalAgents: parseInt(s.ytMaxTotalAgents, 10) || 40,
+    videosMin: parseInt(s.ytVideosPerSessionMin, 10) || 3,
+    videosMax: parseInt(s.ytVideosPerSessionMax, 10) || 7,
+    cooldownMs: parseInt(s.ytAgentCooldownMs, 10) || 60000,
+    launchGapMin: parseInt(s.ytAgentLaunchGapMin, 10) || 10000,
+    launchGapMax: parseInt(s.ytAgentLaunchGapMax, 10) || 15000,
+    proxyType: s.ytProxyType === 'multilogin' ? 'multilogin' : 'smartproxy',
+    sessionSettings: {
+      trafficPreference: s.ytTrafficPreference || 'custom',
+      likeEnabled: s.ytLikeEnabled === true || s.ytLikeEnabled === 'true',
+      adSkipEnabled: s.ytAdSkipEnabled !== false && s.ytAdSkipEnabled !== 'false',
+      adSkipAfterSec: parseInt(s.ytAdSkipAfterSec, 10) || 5,
+      watchTimeMin: parseInt(s.ytWatchTimeMin, 10) || 40,
+      watchTimeMax: parseInt(s.ytWatchTimeMax, 10) || 100,
+    },
+  });
+}
+
+function applyNotificationSettingsFromApp(s) {
+  notificationService.updateSettings({
+    telegramBotToken: s.telegramBotToken,
+    telegramChatId: s.telegramChatId,
+    smtpHost: s.smtpHost,
+    smtpUser: s.smtpUser,
+    smtpPass: s.smtpPass,
+    notifyEmail: s.notifyEmail,
+    mailApiUrl: s.mailApiUrl,
+  });
+}
+
+agentManager.on('log', (entry) => {
+  activityLog.append({
+    level: entry.level === 'error' ? 'error' : entry.level === 'success' ? 'success' : 'info',
+    source: 'yt-agent',
+    message: entry.message,
+    timestamp: new Date(entry.ts).toISOString(),
+  });
+});
+
+agentManager.on('videoDone', ({ agentName, videoId, videoTitle }) => {
+  if (!agentName) return;
+  const key = agentHistoryKey(agentName);
+  if (!watchHistory[key]) watchHistory[key] = [];
+  watchHistory[key].push({
+    videoId,
+    videoTitle,
+    watchedAt: Date.now(),
+    watchPercent: 100,
+  });
+  if (watchHistory[key].length > 200) watchHistory[key] = watchHistory[key].slice(-200);
+  saveWatchHistory(watchHistory);
+});
+
+let ytErrorBurst = [];
+agentManager.on('agentError', (agentId, err) => {
+  ytErrorBurst.push(Date.now());
+  ytErrorBurst = ytErrorBurst.filter(t => Date.now() - t < 5 * 60 * 1000);
+  if (ytErrorBurst.length >= 5) {
+    notificationService.critical('YT Agents failing', `${ytErrorBurst.length} errors in 5 min. Latest: ${err}`).catch(() => {});
+    ytErrorBurst = [];
+  } else {
+    notificationService.warning('Agent error', `${agentId}: ${err}`).catch(() => {});
+  }
+});
+
+agentManager.on('circuitOpen', () => {
+  notificationService.critical('Circuit breaker OPEN', 'Too many failures — YT agent launches paused 5 min').catch(() => {});
+});
+
+let lastRamWarningAt = 0;
+setInterval(() => {
+  try {
+    const status = agentManager.getStatus();
+    const pct = status?.health?.memory?.usedPercent;
+    if (typeof pct === 'number' && pct >= 80) {
+      const now = Date.now();
+      if (now - lastRamWarningAt > 30 * 60 * 1000) {
+        lastRamWarningAt = now;
+        notificationService.warning('High RAM usage', `Memory at ${pct}% — new YT agent launches may pause`).catch(() => {});
+      }
+    }
+  } catch {}
+}, 60 * 1000);
 
 // Watch History — persisted to file
 const HISTORY_FILE = path.resolve(__dirname, '..', 'watch_history.json');
@@ -147,6 +241,34 @@ const DEFAULT_SETTINGS = {
   multiloginMaxConcurrent: '3',
   multiloginBatchGapMs: '45000',
   browserProvider: 'multilogin',
+  ytMaxTotalAgents: '40',
+  ytVideosPerSessionMin: '3',
+  ytVideosPerSessionMax: '7',
+  ytAgentCooldownMs: '60000',
+  ytAgentLaunchGapMin: '10000',
+  ytAgentLaunchGapMax: '15000',
+  ytProxyType: 'smartproxy',
+  ytLikeEnabled: 'false',
+  ytLikeAfterPercent: '60',
+  ytMaxLikesPerSession: '3',
+  ytAdSkipEnabled: 'true',
+  ytAdSkipAfterSec: '5',
+  ytWatchShorts: 'true',
+  ytWatchTimeMin: '40',
+  ytWatchTimeMax: '100',
+  ytTrafficPreference: 'custom',
+  anthropicApiKey: '',
+  telegramBotToken: '',
+  telegramChatId: '',
+  smtpHost: '',
+  smtpUser: '',
+  smtpPass: '',
+  notifyEmail: '',
+  mailApiUrl: '',
+  multiloginPurgeOnDelete: 'true',
+  multiloginAutoEmptyTrash: 'false',
+  multiloginAutoEmptyTrashHours: '6',
+  multiloginAutoArrangeWindows: 'true',
 };
 
 function getMaxConcurrent() {
@@ -160,13 +282,68 @@ function getMaxConcurrent() {
   return parseInt(DEFAULT_SETTINGS.maxConcurrent, 10) || 5;
 }
 
+function proxyLifeToMinutes(life) {
+  const map = { '1hr': 60, '2hr': 120, '4hr': 240, '8hr': 480, '24hr': 1440 };
+  if (life && map[life]) return map[life];
+  const n = parseInt(String(life || ''), 10);
+  return Number.isFinite(n) && n > 0 ? n : 120;
+}
+
+function hydrateSettingsFromEnv(s) {
+  const out = { ...s };
+  const fill = (key, envKey) => {
+    if (!out[key] && process.env[envKey]) out[key] = process.env[envKey];
+  };
+  fill('proxyPassword', 'PROXY_PASSWORD');
+  fill('proxyPrefix', 'PROXY_PREFIX');
+  fill('multiloginToken', 'MULTILOGIN_TOKEN');
+  fill('multiloginFolderId', 'MULTILOGIN_FOLDER_ID');
+  fill('multiloginEmail', 'MULTILOGIN_EMAIL');
+  fill('multiloginPassword', 'MULTILOGIN_PASSWORD');
+  fill('anthropicApiKey', 'ANTHROPIC_API_KEY');
+  fill('telegramBotToken', 'TELEGRAM_BOT_TOKEN');
+  fill('telegramChatId', 'TELEGRAM_CHAT_ID');
+  return out;
+}
+
+/** Fill empty user-settings.json fields from .env so UI + server stay in sync. */
+function persistSettingsHydratedFromEnv(merged) {
+  const hydrated = hydrateSettingsFromEnv(merged);
+  const secretKeys = [
+    'proxyPassword', 'proxyPrefix',
+    'multiloginEmail', 'multiloginPassword', 'multiloginToken', 'multiloginFolderId',
+    'anthropicApiKey',
+  ];
+  let changed = false;
+  const out = { ...merged };
+  for (const key of secretKeys) {
+    const wasEmpty = !out[key] || String(out[key]).trim() === '';
+    const nowVal = hydrated[key];
+    if (wasEmpty && nowVal && String(nowVal).trim() !== '') {
+      out[key] = nowVal;
+      changed = true;
+    }
+  }
+  if (changed) {
+    out.savedAt = Date.now();
+    try {
+      fs.writeFileSync(SETTINGS_FILE, JSON.stringify(out, null, 2));
+      console.log('[Settings] Auto-synced missing credentials from .env → user-settings.json');
+    } catch (err) {
+      console.warn('[Settings] Could not persist .env sync:', err.message);
+    }
+  }
+  return hydrateSettingsFromEnv(out);
+}
+
 function loadAppSettings() {
   try {
     if (fs.existsSync(SETTINGS_FILE)) {
-      return { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
+      const merged = { ...DEFAULT_SETTINGS, ...JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) };
+      return persistSettingsHydratedFromEnv(merged);
     }
   } catch {}
-  return { ...DEFAULT_SETTINGS };
+  return persistSettingsHydratedFromEnv({ ...DEFAULT_SETTINGS });
 }
 
 function parseMoreloginPort(s) {
@@ -181,8 +358,15 @@ function parseMoreloginPort(s) {
 }
 
 function applySettingsToEnv(s) {
+  const pick = (val, envKey) => {
+    const v = val != null ? String(val).trim() : '';
+    if (v) return v;
+    const e = process.env[envKey];
+    return e != null ? String(e).trim() : '';
+  };
   const setIfNonEmpty = (envKey, val) => {
-    if (val != null && String(val).trim() !== '') process.env[envKey] = String(val).trim();
+    const v = pick(val, envKey);
+    if (v) process.env[envKey] = v;
   };
   setIfNonEmpty('MORELOGIN_API_KEY', s.moreloginApiKey);
   process.env.MORELOGIN_PORT = parseMoreloginPort(s);
@@ -192,15 +376,24 @@ function applySettingsToEnv(s) {
   setIfNonEmpty('MULTILOGIN_FOLDER_ID', s.multiloginFolderId);
   if (s.proxyServer) process.env.PROXY_SERVER = String(s.proxyServer);
   if (s.proxyPort) process.env.PROXY_PORT = String(s.proxyPort);
-  if (s.proxyPassword != null) process.env.PROXY_PASSWORD = String(s.proxyPassword);
-  if (s.proxyPrefix != null) process.env.PROXY_PREFIX = String(s.proxyPrefix);
-  if (s.defaultProxyLife) process.env.DEFAULT_PROXY_LIFE = String(s.defaultProxyLife);
+  setIfNonEmpty('PROXY_PASSWORD', s.proxyPassword);
+  setIfNonEmpty('PROXY_PREFIX', s.proxyPrefix);
+  if (s.defaultProxyLife) {
+    process.env.DEFAULT_PROXY_LIFE = String(s.defaultProxyLife);
+    process.env.PROXY_LIFE_MINUTES = String(proxyLifeToMinutes(s.defaultProxyLife));
+  }
   if (s.multiloginMaxConcurrent) process.env.MULTILOGIN_MAX_CONCURRENT = String(s.multiloginMaxConcurrent);
   if (s.multiloginBatchGapMs) process.env.MULTILOGIN_BATCH_GAP_MS = String(s.multiloginBatchGapMs);
+  setIfNonEmpty('ANTHROPIC_API_KEY', s.anthropicApiKey);
+  setIfNonEmpty('TELEGRAM_BOT_TOKEN', s.telegramBotToken);
+  setIfNonEmpty('TELEGRAM_CHAT_ID', s.telegramChatId);
 }
 
 let appSettings = loadAppSettings();
-applySettingsToEnv(appSettings);   // Apply on startup — overrides .env if user-settings.json exists
+applySettingsToEnv(appSettings);
+applyYtAgentSettingsFromApp(appSettings);
+applyNotificationSettingsFromApp(appSettings);
+restartTrashJanitor();
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MORELOGIN API HELPER
@@ -208,15 +401,20 @@ applySettingsToEnv(appSettings);   // Apply on startup — overrides .env if use
 
 function moreloginRequest(endpoint, body) {
   return new Promise((resolve, reject) => {
+    const apiKey = String(process.env.MORELOGIN_API_KEY || '').trim();
+    if (!apiKey) {
+      resolve({ code: -2, msg: 'MORELOGIN_API_KEY is not configured (set in .env or app settings)' });
+      return;
+    }
     const payload = JSON.stringify(body);
     const options = {
       hostname: '127.0.0.1',
-      port: 40000,
+      port: getMoreloginPort(),
       path: endpoint,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': MORELOGIN_API_KEY,
+        'Authorization': apiKey,
         'Content-Length': Buffer.byteLength(payload),
       },
       timeout: 60000,
@@ -243,7 +441,19 @@ function moreloginRequest(endpoint, body) {
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', agents: activeAgents.size, schedules: runningSchedules.size, workers: orchestrator.getStats() });
+  const ytStatus = agentManager.getStatus();
+  res.json({
+    status: 'ok',
+    agents: activeAgents.size,
+    schedules: runningSchedules.size,
+    workers: orchestrator.getStats(),
+    ytAgents: {
+      active: agentManager.getActiveCount(),
+      queued: ytStatus.queue.length,
+      total: Object.keys(ytStatus.agents).length,
+      health: ytStatus.health,
+    },
+  });
 });
 
 // Get all agent statuses (includes worker statuses)
@@ -349,6 +559,7 @@ app.put('/api/schedules', (req, res) => {
   const { schedules } = req.body;
   if (!Array.isArray(schedules)) return res.status(400).json({ error: 'schedules array required' });
   saveSchedulesFile(schedules);
+  syncScheduledJobsFromList(schedules);
   res.json({ success: true, count: schedules.length });
 });
 
@@ -429,6 +640,37 @@ app.delete('/api/logs', requireAuth, (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/api/notifications/test', async (req, res) => {
+  const { type, settings: bodySettings } = req.body || {};
+  const s = bodySettings ? { ...loadAppSettings(), ...bodySettings } : loadAppSettings();
+  applyNotificationSettingsFromApp(s);
+
+  if (type === 'telegram') {
+    const ok = await notificationService.sendTelegram(
+      '✅ <b>MMB AGENT 247</b>\nTest notification — Telegram connected!',
+    );
+    return res.json({
+      success: ok,
+      message: ok ? 'Telegram message sent!' : 'Failed — check Bot Token + Chat ID, then Save settings.',
+    });
+  }
+
+  if (type === 'email') {
+    const ok = await notificationService.sendEmail(
+      'MMB AGENT 247 — Test Email',
+      'Test notification from MMB AGENT 247. If you received this, email alerts are working.',
+    );
+    return res.json({
+      success: ok,
+      message: ok
+        ? 'Email sent via Mail API!'
+        : 'No Mail API — check SMTP + Notify Email, or set Mail API URL. (See server console if log-only.)',
+    });
+  }
+
+  return res.status(400).json({ error: 'type must be "telegram" or "email"' });
+});
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // REAL-TIME ANALYTICS TRACKING — Persisted to file
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -450,6 +692,19 @@ function saveAnalytics(data) {
 }
 
 const analyticsData = loadAnalytics();
+
+setInterval(() => {
+  try {
+    const status = agentManager.getStatus();
+    const active = Object.values(status?.agents || {}).filter(a => a.status === 'running' || a.status === 'watching').length;
+    notificationService.dailyReport({
+      totalViews: analyticsData.totalViews || 0,
+      totalWatchTime: analyticsData.totalWatchTime || 0,
+      totalLikes: analyticsData.totalLikes || 0,
+      activeAgents: active,
+    }).catch(() => {});
+  } catch {}
+}, 60 * 60 * 1000);
 
 // Track an action
 app.post('/api/analytics/track', (req, res) => {
@@ -478,6 +733,7 @@ app.post('/api/analytics/track', (req, res) => {
     case 'traffic_bing': analyticsData.trafficBing = (analyticsData.trafficBing || 0) + 1; break;
     case 'traffic_direct': analyticsData.trafficDirect = (analyticsData.trafficDirect || 0) + 1; break;
     case 'traffic_direct-fallback':
+    case 'traffic_direct-rare':
     case 'traffic_mobile-direct-fallback':
       analyticsData.trafficDirectFallback = (analyticsData.trafficDirectFallback || 0) + 1;
       break;
@@ -555,6 +811,7 @@ function aggregateAnalyticsFromLogs(logs, recentActivity, filterMeta) {
       case 'traffic_bing': filtered.trafficBing++; break;
       case 'traffic_direct': filtered.trafficDirect++; break;
       case 'traffic_direct-fallback':
+      case 'traffic_direct-rare':
       case 'traffic_mobile-direct-fallback':
         filtered.trafficDirectFallback++;
         break;
@@ -729,9 +986,11 @@ function loadShuffleFile() {
       assignments: Array.isArray(raw.assignments) ? raw.assignments : [],
       channelConfigs: Array.isArray(raw.channelConfigs) ? raw.channelConfigs : [],
       enabledChannelIds: Array.isArray(raw.enabledChannelIds) ? raw.enabledChannelIds : [],
+      settings: raw.settings && typeof raw.settings === 'object' ? raw.settings : {},
+      recycleConfig: raw.recycleConfig && typeof raw.recycleConfig === 'object' ? raw.recycleConfig : {},
     };
   } catch {
-    return { assignments: [], channelConfigs: [], enabledChannelIds: [] };
+    return { assignments: [], channelConfigs: [], enabledChannelIds: [], settings: {}, recycleConfig: {} };
   }
 }
 
@@ -769,15 +1028,129 @@ app.post('/api/backlinks/mark-used', (req, res) => {
 });
 
 app.put('/api/shuffle/state', (req, res) => {
-  const { assignments, channelConfigs, enabledChannelIds } = req.body || {};
+  const { assignments, channelConfigs, enabledChannelIds, settings, recycleConfig } = req.body || {};
   const prev = loadShuffleFile();
   const next = {
     assignments: Array.isArray(assignments) ? assignments : prev.assignments,
     channelConfigs: Array.isArray(channelConfigs) ? channelConfigs : prev.channelConfigs,
     enabledChannelIds: Array.isArray(enabledChannelIds) ? enabledChannelIds : prev.enabledChannelIds,
+    settings: settings && typeof settings === 'object' ? settings : prev.settings,
+    recycleConfig: recycleConfig && typeof recycleConfig === 'object' ? recycleConfig : prev.recycleConfig,
   };
   saveShuffleFile(next);
   res.json({ success: true });
+});
+
+app.post('/api/shuffle/assign-one', (req, res) => {
+  const { profileId, profileName, allProfileIds } = req.body || {};
+  if (!profileId) return res.status(400).json({ error: 'profileId required' });
+  try {
+    const shuffleFile = loadShuffleFile();
+    const result = assignOneProfile({
+      profileId,
+      profileName: profileName || profileId,
+      shuffleFile,
+      watchHistory,
+      allProfileIds: Array.isArray(allProfileIds) ? allProfileIds : [],
+    });
+    res.json({ success: true, assignment: result });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+let profileRecycleManager = null;
+
+function initProfileRecycleManager() {
+  profileRecycleManager = new ProfileRecycleManager({
+    orchestrator,
+    getMaxConcurrent,
+    getRunningCount() {
+      return orchestrator.getStats().running + activeAgents.size;
+    },
+    runningSchedules,
+    getWatchHistory: () => watchHistory,
+    loadShuffleFile,
+    activityLog,
+    notificationService,
+    loadAppSettings,
+    onProfileRecreated({ oldId, newId, profileName }) {
+      activityLog.append({
+        level: 'info',
+        source: 'shuffle',
+        message: `[24/7] Profile ID updated: "${profileName}" ${oldId.slice(-6)} → ${newId.slice(-6)}`,
+      });
+    },
+  });
+
+  orchestrator.onWorkerFinished = (profileId, outcome) => {
+    if (profileRecycleManager?.isRecycleProfile(profileId)) {
+      profileRecycleManager.onWorkerFinished(profileId, outcome);
+    }
+  };
+
+  if (!profileRecycleManager.enabled) {
+    profileRecycleManager.resumeFromShuffleConfig().catch((err) => {
+      console.warn('[Recycle] Shuffle config resume failed:', err.message);
+    });
+  }
+}
+
+initProfileRecycleManager();
+
+app.get('/api/recycle/status', (req, res) => {
+  res.json(profileRecycleManager.getStatus());
+});
+
+app.post('/api/recycle/start', async (req, res) => {
+  const { profiles, cooldownMinMinutes, cooldownMaxMinutes } = req.body || {};
+  if (!Array.isArray(profiles) || !profiles.length) {
+    return res.status(400).json({ error: 'profiles array required' });
+  }
+  try {
+    const status = await profileRecycleManager.start({
+      profiles,
+      cooldownMinMinutes: cooldownMinMinutes ?? 10,
+      cooldownMaxMinutes: cooldownMaxMinutes ?? 30,
+    });
+    const recycleConfig = {
+      enabled: true,
+      profileIds: profiles.map((p) => p.id),
+      cooldownMinMinutes: cooldownMinMinutes ?? 10,
+      cooldownMaxMinutes: cooldownMaxMinutes ?? 30,
+    };
+    const shuffle = loadShuffleFile();
+    saveShuffleFile({ ...shuffle, recycleConfig });
+    res.json({ success: true, status });
+  } catch (err) {
+    res.status(500).json({ error: err.message || String(err) });
+  }
+});
+
+app.post('/api/recycle/stop', (req, res) => {
+  const { slotId, profileId } = req.body || {};
+  const status = profileRecycleManager.stop({ slotId, profileId });
+  if (!slotId && !profileId) {
+    const shuffle = loadShuffleFile();
+    saveShuffleFile({ ...shuffle, recycleConfig: { ...shuffle.recycleConfig, enabled: false } });
+  }
+  res.json({ success: true, status });
+});
+
+app.put('/api/recycle/config', (req, res) => {
+  const { cooldownMinMinutes, cooldownMaxMinutes, profileIds } = req.body || {};
+  const status = profileRecycleManager.updateConfig({ cooldownMinMinutes, cooldownMaxMinutes, profileIds });
+  const shuffle = loadShuffleFile();
+  saveShuffleFile({
+    ...shuffle,
+    recycleConfig: {
+      ...shuffle.recycleConfig,
+      cooldownMinMinutes,
+      cooldownMaxMinutes,
+      profileIds,
+    },
+  });
+  res.json({ success: true, status });
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -796,6 +1169,14 @@ const { updateProviderProxy } = require('./services/ProxyProfileUpdater.cjs');
 app.post('/api/proxy/rotate', async (req, res) => {
   const { profileId, currentProxy, browserType } = req.body || {};
   if (!profileId) return res.status(400).json({ success: false, error: 'profileId required' });
+
+  const host = String(currentProxy?.server || currentProxy?.host || '').toLowerCase();
+  if (host.includes('multilogin.com') || host.includes('gate.multilogin')) {
+    return res.status(400).json({
+      success: false,
+      error: 'Multilogin built-in proxy cannot be rotated here — recreate profile or change proxy in MLX app.',
+    });
+  }
 
   try {
     // Generate a fresh proxy keeping same geo (state/city) but new session ID
@@ -886,7 +1267,7 @@ app.post('/api/proxy/check', async (req, res) => {
           try {
             const json = JSON.parse(data);
             if (json.status === 'success') {
-              resolve({ ip: json.query, city: json.city, region: json.regionName, country: json.country, isp: json.isp });
+              resolve({ ip: json.query, city: json.city, region: json.regionName, country: json.country, countryCode: json.countryCode, isp: json.isp });
             } else {
               resolve({ ip: 'Unknown', city: '', region: '', country: '', isp: json.message || '' });
             }
@@ -954,22 +1335,54 @@ app.put('/api/channels-data', (req, res) => {
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// SCHEDULED TIMER — Check every minute for due schedules
+// SCHEDULED TIMER — Check every 15s for due schedules
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const scheduledJobs = new Map(); // scheduleId → { schedule, nextRun }
+const scheduledJobs = new Map(); // scheduleId → { schedule, nextRun, repeat }
+
+function scheduleNextRunMs(schedule) {
+  const t = schedule?.scheduledTime;
+  if (typeof t === 'number' && Number.isFinite(t)) return t;
+  const parsed = new Date(t).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function syncScheduledJobsFromList(list) {
+  if (!Array.isArray(list)) return;
+  scheduledJobs.clear();
+  for (const schedule of list) {
+    if (!schedule?.id) continue;
+    const nextRun = scheduleNextRunMs(schedule);
+    const waiting =
+      schedule.status === 'scheduled'
+      || (schedule.runMode === 'scheduled' && nextRun > Date.now());
+    if (!waiting || nextRun <= Date.now()) continue;
+    scheduledJobs.set(schedule.id, {
+      schedule,
+      nextRun,
+      repeat: schedule.repeatEnabled ? schedule.repeatInterval : null,
+    });
+  }
+  if (scheduledJobs.size > 0) {
+    console.log(`[Timer] ${scheduledJobs.size} schedule(s) armed for auto-run`);
+  }
+}
 
 app.post('/api/schedule/timer/set', (req, res) => {
   const { schedule } = req.body;
   if (!schedule || !schedule.scheduledTime) return res.status(400).json({ error: 'schedule with scheduledTime required' });
-  
+
   const scheduleId = schedule.id || Date.now().toString();
+  const nextRun = scheduleNextRunMs(schedule);
+  if (!nextRun || nextRun <= Date.now()) {
+    return res.status(400).json({ error: 'scheduledTime must be in the future' });
+  }
   scheduledJobs.set(scheduleId, {
     schedule,
-    nextRun: new Date(schedule.scheduledTime).getTime(),
+    nextRun,
     repeat: schedule.repeatEnabled ? schedule.repeatInterval : null,
   });
-  console.log(`[Timer] Schedule "${schedule.name}" set for ${schedule.scheduledTime} (repeat: ${schedule.repeatInterval || 'none'})`);
-  res.json({ success: true, scheduleId });
+  console.log(`[Timer] Schedule "${schedule.name}" set for ${new Date(nextRun).toLocaleString()} (repeat: ${schedule.repeatInterval || 'none'})`);
+  res.json({ success: true, scheduleId, nextRun });
 });
 
 app.get('/api/schedule/timer/list', (req, res) => {
@@ -1020,7 +1433,13 @@ setInterval(() => {
       scheduledJobs.delete(id);
     }
   }
-}, 60000);
+}, 15000);
+
+try {
+  syncScheduledJobsFromList(loadSchedulesFile());
+} catch (err) {
+  console.warn('[Timer] Failed to hydrate schedules:', err.message);
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // WORKER THREAD STATUS
@@ -1156,6 +1575,25 @@ app.post('/api/manual/start', async (req, res) => {
 app.post('/api/manual/batch', async (req, res) => {
   const { profileIds, command, params } = req.body;
   if (!profileIds || !command) return res.status(400).json({ error: 'profileIds and command required' });
+
+  if (command === 'arrangeWindows') {
+    const { arrangeProfilesGrid, resolveRunningFromCache } = require('./services/windowArranger.cjs');
+    const runningIds = profileIds.length
+      ? profileIds
+      : orchestrator.getAllStatuses()
+        .filter((w) => ['running', 'watching', 'starting', 'connecting', 'waiting'].includes(w.status))
+        .map((w) => w.profileId);
+    const entries = resolveRunningFromCache(runningIds);
+    if (entries.length > 0) {
+      const results = await arrangeProfilesGrid(entries);
+      const ok = results.filter((r) => r.status === 'ok').length;
+      return res.json({
+        success: ok > 0,
+        results,
+        message: ok > 0 ? `Arranged ${ok}/${results.length} windows on screen` : 'Could not arrange windows — check CDP ports',
+      });
+    }
+  }
 
   // Reset cleanup timer for all active profiles (user is actively using them)
   for (const profileId of profileIds) {
@@ -1640,6 +2078,24 @@ app.put('/api/cookies/metadata', async (req, res) => {
   res.status(result.code === 0 ? 200 : 502).json(result);
 });
 
+// POST /api/cookies/warm-high-cpc — full high CPC/RPM bake for existing profile
+app.post('/api/cookies/warm-high-cpc', async (req, res) => {
+  const { profileId } = req.body || {};
+  if (!profileId) {
+    return res.status(400).json({ code: -5, message: 'profileId is required', data: null });
+  }
+  try {
+    const { MultiloginProvider } = require('./providers/MultiloginProvider.cjs');
+    const { HighCPCCookieWarmer } = require('./services/HighCPCCookieWarmer.cjs');
+    const provider = new MultiloginProvider();
+    const warmer = new HighCPCCookieWarmer(provider);
+    const result = await warmer.warmOnCreate(profileId, { profileMode: 'cloud' });
+    res.json({ code: 0, message: 'High CPC/RPM cookie warm complete', data: result });
+  } catch (err) {
+    res.status(500).json({ code: -1, message: err.message, data: null });
+  }
+});
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // SETTINGS API
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1675,6 +2131,9 @@ app.post('/api/settings', (req, res) => {
   applySettingsToEnv(appSettings);
 
   try { providerFactory.clearCache(); } catch {}
+  applyYtAgentSettingsFromApp(appSettings);
+  applyNotificationSettingsFromApp(appSettings);
+  restartTrashJanitor();
 
   console.log('[Settings] Saved and applied:', Object.keys(clean).join(', '));
   activityLog.append({

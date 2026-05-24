@@ -59,6 +59,10 @@ export default function App() {
             onStopSelected={store.stopSelected}
             onRenewProxy={store.renewProxy}
             onOpenSettings={(id) => { setSettingsProfileId(id); store.setActiveTab('profile-settings'); }}
+            onDeleteSelected={() => {
+              const selected = store.profiles.filter(p => p.selected);
+              selected.forEach(p => store.deleteProfile(p.id));
+            }}
           />
         );
       case 'sites':

@@ -21,6 +21,41 @@ export interface AppSettings {
   multiloginMaxConcurrent: string;
   multiloginBatchGapMs: string;
   browserProvider: ProviderSelection;
+  // Cron scheduler
+  cronEnabled: boolean;
+  cronSchedule: string;
+  // AI Brain
+  anthropicApiKey: string;
+  // YT Agent 24/7
+  ytMaxTotalAgents: string;
+  ytVideosPerSessionMin: string;
+  ytVideosPerSessionMax: string;
+  ytAgentCooldownMs: string;
+  ytAgentLaunchGapMin: string;
+  ytAgentLaunchGapMax: string;
+  ytProxyType: 'smartproxy' | 'multilogin';
+  ytLikeEnabled: boolean | string;
+  ytLikeAfterPercent: string;
+  ytMaxLikesPerSession: string;
+  ytAdSkipEnabled: boolean | string;
+  ytAdSkipAfterSec: string;
+  ytWatchShorts: boolean | string;
+  ytWatchTimeMin: string;
+  ytWatchTimeMax: string;
+  ytTrafficPreference: string;
+  // Notifications
+  telegramBotToken: string;
+  telegramChatId: string;
+  smtpHost: string;
+  smtpUser: string;
+  smtpPass: string;
+  notifyEmail: string;
+  mailApiUrl: string;
+  // Multilogin trash
+  multiloginPurgeOnDelete: boolean | string;
+  multiloginAutoEmptyTrash: boolean | string;
+  multiloginAutoEmptyTrashHours: string;
+  multiloginAutoArrangeWindows: boolean | string;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -41,6 +76,36 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   multiloginMaxConcurrent: '3',
   multiloginBatchGapMs: '45000',
   browserProvider: 'multilogin',
+  cronEnabled: false,
+  cronSchedule: '0 9 * * *',
+  anthropicApiKey: '',
+  ytMaxTotalAgents: '40',
+  ytVideosPerSessionMin: '3',
+  ytVideosPerSessionMax: '7',
+  ytAgentCooldownMs: '60000',
+  ytAgentLaunchGapMin: '10000',
+  ytAgentLaunchGapMax: '15000',
+  ytProxyType: 'smartproxy',
+  ytLikeEnabled: false,
+  ytLikeAfterPercent: '60',
+  ytMaxLikesPerSession: '3',
+  ytAdSkipEnabled: true,
+  ytAdSkipAfterSec: '5',
+  ytWatchShorts: true,
+  ytWatchTimeMin: '40',
+  ytWatchTimeMax: '100',
+  ytTrafficPreference: 'custom',
+  telegramBotToken: '',
+  telegramChatId: '',
+  smtpHost: '',
+  smtpUser: '',
+  smtpPass: '',
+  notifyEmail: '',
+  mailApiUrl: '',
+  multiloginPurgeOnDelete: true,
+  multiloginAutoEmptyTrash: false,
+  multiloginAutoEmptyTrashHours: '6',
+  multiloginAutoArrangeWindows: true,
 };
 
 const STORAGE_KEY = 'mmb_yt_settings';
@@ -95,6 +160,23 @@ export async function saveSettingsToServer(settings: AppSettings): Promise<{ suc
     return { success: true };
   } catch (err) {
     return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function testNotification(
+  type: 'telegram' | 'email',
+  settings: AppSettings,
+): Promise<{ ok: boolean; message: string }> {
+  try {
+    const res = await fetch(backendUrl('/api/notifications/test'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, settings }),
+    });
+    const data = await res.json();
+    return { ok: !!data.success, message: data.message || data.error || `HTTP ${res.status}` };
+  } catch (err) {
+    return { ok: false, message: err instanceof Error ? err.message : 'Network error' };
   }
 }
 

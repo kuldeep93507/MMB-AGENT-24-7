@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Save, RefreshCw, Globe, Server, Clock, Shield, Eye, EyeOff,
   Monitor, Layers, Key, Folder, AlertCircle, CheckCircle,
-  Loader, Lock, Unlock, RotateCcw, Zap, ChevronRight,
+  Loader, Lock, Unlock, RotateCcw, Zap, ChevronRight, Brain,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { BrowserProvider, ProviderSelection } from '../services/browserProviderApi';
@@ -32,22 +32,23 @@ interface AppSettings {
   cronSchedule: string;
   cronAction: string;
   backendPort: string;
+  anthropicApiKey: string;
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   moreloginBaseUrl: 'http://127.0.0.1:40000',
-  moreloginApiKey: 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e',
+  moreloginApiKey: '',
   moreloginSecurityEnabled: true,
   multiloginEmail: '',
   multiloginPassword: '',
   multiloginToken: '',
-  multiloginFolderId: 'fb5dbb2c-c1dc-45ee-9fa1-f34819d84bf2',
+  multiloginFolderId: '',
   adspowerApiKey: '',
   adspowerPort: '50325',
   proxyServer: 'us.smartproxy.net',
   proxyPort: '3120',
-  proxyPassword: 'xEdCpOSFn3nd4ixu',
-  proxyPrefix: 'smart-pwgbkxcy3lyi',
+  proxyPassword: '',
+  proxyPrefix: '',
   defaultProxyLife: '4hr',
   startDelay: '5000',
   actionDelay: '2000',
@@ -57,6 +58,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   cronSchedule: '0 9 * * *',
   cronAction: 'start_all',
   backendPort: '3200',
+  anthropicApiKey: '',
 };
 
 const PROVIDER_INFO: Record<BrowserProvider, { label: string; connection: string; color: string }> = {
@@ -100,6 +102,7 @@ export default function SettingsPage() {
   const [showMlPassword, setShowMlPassword] = useState(false);
   const [showMlToken, setShowMlToken] = useState(false);
   const [showProxyPass, setShowProxyPass] = useState(false);
+  const [showAnthropicKey, setShowAnthropicKey] = useState(false);
   const [proxyUnlocked, setProxyUnlocked] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'loading' | 'ok' | 'error'>('loading');
   const [testStatus, setTestStatus]   = useState<Record<string, TestStatus>>({});
@@ -168,6 +171,7 @@ export default function SettingsPage() {
           cronSchedule:             settings.cronSchedule,
           cronAction:               settings.cronAction,
           backendPort:              settings.backendPort,
+          anthropicApiKey:          settings.anthropicApiKey,
         }),
       });
       const data = await res.json();
@@ -621,16 +625,55 @@ export default function SettingsPage() {
 
           <div className="mt-3 grid grid-cols-3 gap-2">
             {[
-              { expr: '0 9 * * *',   desc: 'Every day at 9am' },
-              { expr: '0 */6 * * *', desc: 'Every 6 hours' },
-              { expr: '*/30 * * * *',desc: 'Every 30 minutes' },
+              { expr: '*/15 * * * *', desc: 'Every 15 min' },
+              { expr: '*/30 * * * *', desc: 'Every 30 min' },
+              { expr: '0 * * * *',    desc: 'Every hour' },
+              { expr: '0 */3 * * *',  desc: 'Every 3 hours' },
+              { expr: '0 */6 * * *',  desc: 'Every 6 hours' },
+              { expr: '0 9 * * *',    desc: 'Every day at 9am' },
             ].map(({ expr, desc }) => (
               <button key={expr} onClick={() => update('cronSchedule', expr)}
-                className="bg-gray-800 border border-gray-700 rounded-xl p-2.5 text-left hover:border-gray-600 transition-all">
+                className={`border rounded-xl p-2.5 text-left transition-all ${settings.cronSchedule === expr ? 'bg-purple-900/20 border-purple-500/40' : 'bg-gray-800 border-gray-700 hover:border-gray-600'}`}>
                 <div className="text-purple-400 font-mono text-xs">{expr}</div>
                 <div className="text-gray-500 text-xs mt-1">{desc}</div>
               </button>
             ))}
+          </div>
+        </Section>
+
+        {/* AI Brain */}
+        <Section title="AI Brain (Claude)" icon={<Brain size={15} className="text-violet-400" />}
+          note="Optional — enables Claude AI for human-like decision-making per profile. Leave empty to use the persona system instead.">
+          <div className="bg-violet-900/15 border border-violet-600/25 rounded-xl p-3 text-xs text-violet-300 mb-4 flex items-start gap-2">
+            <Brain size={13} className="flex-shrink-0 mt-0.5" />
+            <span>When set, each profile uses Claude to decide scroll depth, reading time, and interaction patterns — making behaviour less predictable and more human-like.</span>
+          </div>
+
+          <div>
+            <label className="text-gray-400 text-xs font-medium block mb-1.5">Anthropic API Key</label>
+            <div className="flex items-center gap-2">
+              <input
+                type={showAnthropicKey ? 'text' : 'password'}
+                value={settings.anthropicApiKey}
+                onChange={e => update('anthropicApiKey', e.target.value)}
+                placeholder="sk-ant-api03-…"
+                className="flex-1 bg-gray-800 border border-gray-700 text-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono focus:outline-none focus:border-violet-500 transition-all"
+              />
+              <button onClick={() => setShowAnthropicKey(!showAnthropicKey)}
+                className="p-2.5 bg-gray-800 border border-gray-700 rounded-xl text-gray-400 hover:text-white transition-all">
+                {showAnthropicKey ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+            </div>
+            <p className="text-gray-600 text-xs mt-1.5">
+              Get your key at <span className="text-violet-400 font-mono">console.anthropic.com/settings/keys</span>
+            </p>
+          </div>
+
+          <div className="mt-4 flex items-center gap-3">
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${settings.anthropicApiKey ? 'bg-green-500 animate-pulse' : 'bg-gray-600'}`} />
+            <span className={`text-xs ${settings.anthropicApiKey ? 'text-green-400' : 'text-gray-500'}`}>
+              {settings.anthropicApiKey ? 'AI Brain active — Claude will guide profile behaviour' : 'AI Brain disabled — using persona system'}
+            </span>
           </div>
         </Section>
 

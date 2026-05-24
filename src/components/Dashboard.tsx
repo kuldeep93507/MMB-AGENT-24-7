@@ -26,6 +26,7 @@ interface WorkerRow {
 interface DashboardProps {
   profiles: Profile[];
   setActiveTab: (tab: string) => void;
+  onRefreshProfiles?: () => void;
 }
 
 const LIVE_PROFILE_STATUSES = new Set(['running', 'starting']);
@@ -37,7 +38,7 @@ function isWorkerLive(status: string): boolean {
   return LIVE_WORKER_STATUSES.has(status);
 }
 
-export default function Dashboard({ profiles, setActiveTab }: DashboardProps) {
+export default function Dashboard({ profiles, setActiveTab, onRefreshProfiles }: DashboardProps) {
   const [workers, setWorkers] = useState<WorkerRow[]>([]);
   const [workerStats, setWorkerStats] = useState({ total: 0, running: 0, done: 0, error: 0, waiting: 0 });
   const [health, setHealth] = useState<BackendHealth | null>(null);
@@ -271,7 +272,7 @@ export default function Dashboard({ profiles, setActiveTab }: DashboardProps) {
         ))}
       </div>
 
-      <LiveProgressPanel profiles={profiles} hideWhenIdle={false} />
+      <LiveProgressPanel profiles={profiles} hideWhenIdle={false} onRefreshProfiles={onRefreshProfiles} />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">

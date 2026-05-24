@@ -7,7 +7,7 @@
  */
 
 const { providerFactory } = require('./providers/ProviderFactory.cjs');
-const { RecreateHandler } = require('./services/RecreateHandler.cjs');
+const RecreateHandler = require('./services/RecreateHandler.cjs');
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));

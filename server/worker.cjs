@@ -154,6 +154,13 @@ async function runWorker(data) {
       });
       if (res.profileId && res.profileId !== pid) {
         sendLog(pid, 'info', `Use new profile ID in app: ${res.profileId}`);
+        if (parentPort) {
+          parentPort.postMessage({
+            type: 'profile_rebinding',
+            oldProfileId: pid,
+            profileId: res.profileId,
+          });
+        }
         profileId = res.profileId;
       }
       if (res.cdpPort) {
@@ -177,6 +184,15 @@ async function runWorker(data) {
   }
 
   sendStatus(profileId, 'running');
+
+  if (parentPort) {
+    try {
+      const { loadAutoArrangeSetting } = require('./services/windowArranger.cjs');
+      if (loadAutoArrangeSetting()) {
+        parentPort.postMessage({ type: 'window_connected', profileId, cdpPort });
+      }
+    } catch { /* ignore */ }
+  }
 
   // Step 3: Watch videos one by one
   for (let i = 0; i < videos.length; i++) {
@@ -291,23 +307,38 @@ async function runWorker(data) {
     }
   }
 
-  // Step 4: Done — disconnect Playwright + close browser via provider
-  // try/finally guarantee karta hai ki browser HAMESHA close hoga
-  // chahe disconnect crash kare ya na kare
+  // Step 4: Done — wait 10s, stop Multilogin profile, then disconnect Playwright
+  const closePort = agent?.debugPort || cdpPort;
+  sendLog(profileId, 'info', 'All videos done — closing browser in 10 seconds...');
+  await sleep(10000);
+
+  activeWorkerAgent = null;
+  let closed = false;
+  try {
+    const provider = providerFactory.getProvider(browserType);
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const stopRes = await provider.stopProfile(profileId, { cdpPort: closePort });
+      if (stopRes && stopRes.code === 0) {
+        sendLog(profileId, 'success', `${providerLabel} browser closed ✓`);
+        closed = true;
+        break;
+      }
+      if (attempt < 5) {
+        sendLog(profileId, 'warn', `Close attempt ${attempt}/5 failed (${stopRes?.message || 'unknown'}) — retrying...`);
+        await sleep(3000);
+      }
+    }
+    if (!closed) {
+      sendLog(profileId, 'error', 'Could not close browser — please close profile manually in Multilogin');
+    }
+  } catch (err) {
+    sendLog(profileId, 'warn', `Could not close browser: ${err.message}`);
+  }
+
   try {
     await agent.disconnect();
   } catch (err) {
     sendLog(profileId, 'warn', `Disconnect error (non-critical): ${err.message}`);
-  } finally {
-    activeWorkerAgent = null;
-    // YE HAMESHA CHALEGA — error ho ya na ho
-    try {
-      const provider = providerFactory.getProvider(browserType);
-      await provider.stopProfile(profileId);
-      sendLog(profileId, 'info', `${providerLabel} browser closed ✓`);
-    } catch (err) {
-      sendLog(profileId, 'warn', `Could not close browser: ${err.message}`);
-    }
   }
   
   sendStatus(profileId, 'done');
@@ -339,7 +370,7 @@ if (parentPort) {
           activeWorkerAgent = null;
         }
         const stopProvider = providerFactory.getProvider(bt);
-        await stopProvider.stopProfile(stopProfileId).catch((err) => {
+        await stopProvider.stopProfile(stopProfileId, { cdpPort: msg.cdpPort }).catch((err) => {
           sendLog(stopProfileId, 'warn', `Stop profile on stop signal: ${err.message}`);
         });
       } catch (err) {

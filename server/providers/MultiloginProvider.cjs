@@ -3,19 +3,23 @@
  * 
  * Multilogin uses TWO different API endpoints:
  *   1. Cloud API: https://api.multilogin.com (for CRUD — create, delete, list, search)
- *   2. Local Launcher: https://launcher.mlx.yt:45001 (for start/stop — must be running locally)
+ *   2. Local Launcher base URL (optional override MULTILOGIN_LAUNCHER_BASE — default https://launcher.mlx.yt:45001 )
+ *      Stop profiles per docs:
+ *      - GET /api/v1/profile/stop?profile_id=<uuid>
+ *      - GET /api/v1/profile/stop/p/<uuid> (automation guides)
+ *      - GET /api/v2/profile/f/<folder_id>/p/<profile_id>/stop (symmetric with v2 start)
  * 
  * Token management:
- *   - Bearer token obtained via POST /user/signin with email + password
- *   - Token expires in 30 minutes
- *   - Proactively refresh at 25 minutes
- *   - On 401 response: refresh once, retry original request
- *   - If refresh fails: return code -4 error
+ *   - Bearer token: POST /user/signin OR MULTILOGIN_TOKEN (automation token, long-lived).
+ *   - SHORT session token from sign-in expires (~30min) — proactively refresh ~25min when using password flow only.
+ *   - Automation token MULTILOGIN_TOKEN: may be revoked/expired anytime — code cannot know until cloud/launcher rejects it.
+ *   - On launcher "Profile Authorization" / 401 cloud: retry once via email+password sign-in + fresh automation_token (if configured).
  * 
  * Configuration (via environment variables):
  *   MULTILOGIN_EMAIL — Account email for signin
  *   MULTILOGIN_PASSWORD — Account password for signin
  *   MULTILOGIN_FOLDER_ID — Folder ID for profile organization (required)
+ *   MULTILOGIN_LAUNCHER_BASE — Launcher host (optional, default MLX cloud launcher)
  * 
  * Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11, 10.2
  */
@@ -25,14 +29,25 @@
 const { BrowserProvider } = require('./BrowserProvider.cjs');
 const https = require('https');
 const crypto = require('crypto');
+const { normalizeProxyCountry } = require('../services/proxyCountry.cjs');
+const {
+  isMultiloginProxyType,
+  isSmartProxyType,
+  isSmartProxyHost,
+  isMultiloginProxyHost,
+} = require('../services/proxyType.cjs');
 
 function md5(str) {
   return crypto.createHash('md5').update(str, 'utf8').digest('hex');
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 // API endpoints
 const CLOUD_API_BASE = 'https://api.multilogin.com';
-const LAUNCHER_BASE = 'https://launcher.mlx.yt:45001';
+const LAUNCHER_BASE = String(process.env.MULTILOGIN_LAUNCHER_BASE || 'https://launcher.mlx.yt:45001').replace(/\/+$/, '');
 const PROXY_API_BASE = 'https://profile-proxy.multilogin.com'; // Multilogin residential proxy service
 
 // Token timing
@@ -81,19 +96,30 @@ class MultiloginProvider extends BrowserProvider {
   /**
    * Authenticate with Multilogin Cloud API.
    * POST https://api.multilogin.com/user/signin with {email, password}
-   * Skipped if MULTILOGIN_TOKEN is set in .env (static automation token preferred).
+   * If MULTILOGIN_TOKEN is set, returns it immediately UNLESS options.skipStaticToken is true
+   * (used to recover from launcher/cloud rejecting a stale automation token).
    *
+   * @param {{ skipStaticToken?: boolean }} [options]
    * @returns {Promise<{code: number, message: string, data: object|null}>}
    */
-  async authenticate() {
-    // If static automation token is set, return success immediately — no signin needed
-    if (process.env.MULTILOGIN_TOKEN) {
+  async authenticate(options = {}) {
+    const skipStaticToken = options.skipStaticToken === true;
+
+    if (!skipStaticToken && process.env.MULTILOGIN_TOKEN && String(process.env.MULTILOGIN_TOKEN).trim()) {
       this.token = process.env.MULTILOGIN_TOKEN;
       this.tokenExpiresAt = Date.now() + (30 * 24 * 60 * 60 * 1000);
-      return this._successResponse('Using static automation token', { token: this.token });
+      return this._successResponse('Using static automation token', { authenticated: true });
     }
 
     if (!this.email || !this.password) {
+      if (skipStaticToken) {
+        return this._errorResponse(
+          -4,
+          'Multilogin automation token was rejected but email/password are not set — cannot mint a new token automatically. '
+          + 'In Multilogin X: Workspace → create a new Automation API token and put it in Settings as MULTILOGIN_TOKEN, '
+          + 'OR add MULTILOGIN_EMAIL + MULTILOGIN_PASSWORD so the server can sign in and refresh the token.',
+        );
+      }
       return this._errorResponse(-2, 'Multilogin credentials not configured: MULTILOGIN_EMAIL and MULTILOGIN_PASSWORD required');
     }
 
@@ -158,7 +184,7 @@ class MultiloginProvider extends BrowserProvider {
               console.warn(`[multilogin] Could not fetch automation token: ${autoErr.message}`);
             }
 
-            return this._successResponse('Authenticated successfully', { token: this.token });
+            return this._successResponse('Authenticated successfully', { authenticated: true });
           }
 
           return this._errorResponse(-2, 'Multilogin signin response did not contain a token');
@@ -225,22 +251,28 @@ class MultiloginProvider extends BrowserProvider {
    * @returns {Promise<{code: number, message: string, data: object|null}>}
    */
   async refreshToken() {
-    console.log('[multilogin] Token expired or invalid, attempting refresh...');
+    console.log('[multilogin] Token expired or rejected — clearing cache and refreshing...');
 
-    // Clear current token
     this.token = null;
     this.tokenExpiresAt = 0;
 
-    // Attempt re-authentication
-    const result = await this.authenticate();
-
-    if (result.code !== 0) {
-      // Refresh failed — return code -4
-      console.error('[multilogin] Token refresh failed');
-      return this._errorResponse(-4, 'Multilogin token refresh failed: re-authentication required');
+    // Prefer NEW session from password; skip re-using stale MULTILOGIN_TOKEN (common cause of "Profile Authorization error").
+    if (this.email && this.password) {
+      const pwdResult = await this.authenticate({ skipStaticToken: true });
+      if (pwdResult.code === 0) {
+        console.log('[multilogin] Token refreshed via cloud sign-in (automation token may have been rewritten to .env).');
+        return pwdResult;
+      }
+      console.error(`[multilogin] Password-based refresh failed: ${pwdResult.message}`);
+      return pwdResult.code === -2 ? pwdResult : this._errorResponse(-4, pwdResult.message || 'Multilogin token refresh failed');
     }
 
-    return result;
+    // No password on file — cannot mint a new token; reloading MULTILOGIN_TOKEN from env would just re-use the same stale value.
+    return this._errorResponse(
+      -4,
+      'Multilogin token refresh failed: add MULTILOGIN_EMAIL + MULTILOGIN_PASSWORD in Settings/.env so the server can sign in, '
+      + 'or replace MULTILOGIN_TOKEN with a new Automation API token from Multilogin X (then restart the server if you only edited .env).',
+    );
   }
 
   /**
@@ -329,6 +361,302 @@ class MultiloginProvider extends BrowserProvider {
     }
   }
 
+  /** Default MLX cloud flags (required on create/update since API v12). */
+  _defaultCloudFlags(proxyMasking = 'disabled') {
+    return {
+      audio_masking: 'natural',
+      fonts_masking: 'natural',
+      geolocation_masking: 'mask',
+      geolocation_popup: 'allow',
+      graphics_masking: 'natural',
+      graphics_noise: 'natural',
+      localization_masking: 'mask',
+      media_devices_masking: 'natural',
+      navigator_masking: 'mask',
+      ports_masking: 'mask',
+      proxy_masking: proxyMasking,
+      screen_masking: 'natural',
+      timezone_masking: 'mask',
+      webrtc_masking: 'mask',
+      canvas_noise: 'natural',
+    };
+  }
+
+  _defaultCloudStorage() {
+    return {
+      is_local: false,
+      save_service_worker: true,
+      bookmarks: true,
+      cookies: true,
+      extensions: true,
+      history: true,
+      local_storage: true,
+      passwords: true,
+    };
+  }
+
+  _getCoreVersion() {
+    const fromEnv = parseInt(process.env.MULTILOGIN_CORE_VERSION, 10);
+    return Number.isFinite(fromEnv) && fromEnv > 0 ? fromEnv : 148;
+  }
+
+  _isCloud501Message(msg) {
+    return /501|unsupported method/i.test(String(msg || ''));
+  }
+
+  /**
+   * Retry cloud POST when Multilogin returns intermittent HTTP 501.
+   * @private
+   */
+  async _authenticatedCloudRequestWithRetry(endpoint, options = {}, maxAttempts = 5) {
+    const backoff = [0, 1500, 3000, 5000, 8000];
+    let lastResult = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      if (attempt > 0) {
+        console.log(`[multilogin] Cloud retry ${attempt}/${maxAttempts - 1} for ${endpoint} in ${backoff[attempt] / 1000}s...`);
+        await new Promise(r => setTimeout(r, backoff[attempt]));
+      }
+
+      lastResult = await this._authenticatedCloudRequest(endpoint, options);
+      if (lastResult.code === 0) return lastResult;
+
+      if (!this._isCloud501Message(lastResult.message)) {
+        return lastResult;
+      }
+    }
+
+    return lastResult;
+  }
+
+  /** Pick a seed profile for clone fallback (env override or first in folder). */
+  async _getTemplateProfileId() {
+    const fromEnv = process.env.MULTILOGIN_TEMPLATE_PROFILE_ID || '';
+    if (fromEnv.trim()) return fromEnv.trim();
+
+    const search = await this._authenticatedCloudRequest('/profile/search', {
+      body: { search_text: '', limit: 10, offset: 0, is_removed: false },
+    });
+    if (search.code !== 0 || !search.data) return '';
+
+    const list = search.data.profiles || search.data || [];
+    const first = Array.isArray(list) && list.length > 0 ? list[0] : null;
+    return first ? String(first.id || first.profile_id || first.uuid || '') : '';
+  }
+
+  /**
+   * Clone an existing cloud profile when /profile/create is unavailable.
+   * @param {object} options
+   * @param {object|null} proxyResult - from _resolveProxy
+   */
+  async cloneProfile(options, proxyResult = null) {
+    if (!this.folderId) {
+      return this._errorResponse(-5, 'MULTILOGIN_FOLDER_ID environment variable is not set');
+    }
+
+    const templateId = await this._getTemplateProfileId();
+    if (!templateId) {
+      return this._errorResponse(-1, 'No template profile found for clone fallback — create one profile manually in Multilogin X first');
+    }
+
+    const body = {
+      profile_id: templateId,
+      name: (options && options.name) || `Profile ${Date.now()}`,
+      folder_id: this.folderId,
+      include_cookies: false,
+      include_extensions: false,
+      include_bookmarks: false,
+    };
+
+    console.log(`[multilogin] cloneProfile fallback → template ${templateId.slice(0, 8)}...`);
+    const result = await this._authenticatedCloudRequestWithRetry('/profile/clone', { body }, 3);
+
+    if (result.code !== 0 || !result.data) return result;
+
+    const newId = result.data.cloned_profile_id
+      || result.data.profile_id
+      || result.data.id
+      || '';
+
+    if (!newId) {
+      return this._errorResponse(-1, 'Clone succeeded but no profile ID returned');
+    }
+
+    if (proxyResult && proxyResult.success && proxyResult.proxy) {
+      const proxyUpdate = await this.updateProfileProxy(newId, {
+        server: proxyResult.proxy.host,
+        host: proxyResult.proxy.host,
+        port: proxyResult.proxy.port,
+        username: proxyResult.proxy.username,
+        password: proxyResult.proxy.password,
+        type: proxyResult.proxy.type || 'socks5',
+      });
+      if (proxyUpdate.code !== 0) {
+        console.warn(`[multilogin] Cloned ${newId} but proxy update failed: ${proxyUpdate.message}`);
+      }
+    }
+
+    return this._successResponse('Profile cloned successfully', {
+      id: newId,
+      clonedFrom: templateId,
+      proxyUsed: proxyResult?.proxy || null,
+      proxySource: proxyResult?.source || null,
+    });
+  }
+
+  /**
+   * MLX flags aligned with fingerprint payload — full anti-detect set.
+   * WebRTC + geolocation use `mask` so MLX syncs with proxy (no public_ip required).
+   */
+  _flagsForFingerprintPayload(fingerprintPayload, includeProxy, fpConfig) {
+    const fp = fingerprintPayload || {};
+    const cfg = fpConfig || {};
+    const flags = this._defaultCloudFlags(includeProxy ? 'custom' : 'disabled');
+
+    flags.webrtc_masking = 'mask';
+    flags.geolocation_masking = 'mask';
+    flags.geolocation_popup = 'allow';
+    flags.ports_masking = 'mask';
+    flags.proxy_masking = includeProxy ? 'custom' : 'disabled';
+
+    if (fp.canvas) {
+      flags.canvas_noise = 'mask';
+    } else {
+      flags.canvas_noise = cfg.canvas === 'real' ? 'natural' : 'mask';
+    }
+
+    if (fp.webgl && fp.webgl.seed) {
+      flags.graphics_noise = 'mask';
+    } else {
+      flags.graphics_noise = cfg.canvas === 'real' ? 'natural' : 'mask';
+    }
+
+    flags.graphics_masking = fp.graphic ? 'custom' : 'natural';
+    flags.audio_masking = fp.audio ? 'mask' : 'natural';
+    flags.navigator_masking = fp.navigator ? 'custom' : (cfg.navigator === 'real' ? 'custom' : 'mask');
+    flags.screen_masking = fp.screen ? 'custom' : (cfg.screen === 'real' ? 'natural' : 'mask');
+    flags.timezone_masking = fp.timezone ? 'custom' : (cfg.timezone === 'real' ? 'custom' : 'mask');
+    flags.localization_masking = (fp.language || fp.localization) ? 'custom' : 'mask';
+    flags.fonts_masking = (fp.fonts && fp.fonts.length) ? 'custom' : 'natural';
+    flags.media_devices_masking = fp.media_devices ? 'custom' : 'natural';
+
+    return flags;
+  }
+
+  /** Build full parameters.flags + parameters.fingerprint for Cloud and Quick. */
+  _buildAntidetectParameters(options, includeProxy) {
+    if (!options || !options.fingerprint) {
+      return {
+        flags: this._defaultCloudFlags(includeProxy ? 'custom' : 'disabled'),
+        fingerprint: {},
+      };
+    }
+
+    const fp = options.fingerprint;
+    const fingerprintPayload = this.buildFingerprintPayload({ ...fp, os: options.os });
+    const fpConfig = options.fingerprintConfig || {
+      canvas: 'real',
+      webrtc: 'real',
+      timezone: 'real',
+      screen: 'real',
+      navigator: 'real',
+    };
+    const flags = this._flagsForFingerprintPayload(fingerprintPayload, includeProxy, fpConfig);
+
+    const canvasSeed = fp.canvasNoise && fp.canvasNoise.seed;
+    if (canvasSeed) {
+      console.log(
+        `[multilogin] antidetect → canvas:${canvasSeed.slice(0, 8)} webgl:${(fp.webGLNoise && fp.webGLNoise.seed || '').slice(0, 8)} audio:${(fp.audioContextNoise && fp.audioContextNoise.seed || '').slice(0, 8)}`
+      );
+    }
+
+    return { flags, fingerprint: fingerprintPayload };
+  }
+
+  /** Merge generated fingerprint into cloud create body. */
+  _applyFingerprintToCloudBody(body, options, osType) {
+    if (!options || !options.fingerprint) return;
+
+    const { flags, fingerprint } = this._buildAntidetectParameters(
+      options,
+      !!(body.parameters && body.parameters.proxy)
+    );
+    if (Object.keys(fingerprint).length > 0) {
+      body.parameters.fingerprint = fingerprint;
+      body.parameters.flags = flags;
+    }
+
+    const fp = options.fingerprint;
+    // Legacy top-level navigator/screen (some MLX versions read these)
+    if (fp.userAgent) {
+      const platformMap = { windows: 'Win32', macos: 'MacIntel', android: 'Linux armv8l' };
+      const rawRam = fp.ram || 8;
+      const devMemory = rawRam >= 16 ? 8 : rawRam >= 8 ? 8 : rawRam >= 4 ? 4 : 2;
+      body.parameters.navigator = {
+        user_agent: fp.userAgent,
+        hardware_concurrency: fp.cpu || 4,
+        device_memory: devMemory,
+        platform: platformMap[osType] || 'Win32',
+      };
+    }
+    if (fp.resolution) {
+      const parts = String(fp.resolution).split('x');
+      if (parts.length === 2) {
+        const dpr = fp.pixelRatio || (osType === 'android' ? 2.625 : 1);
+        body.parameters.screen = {
+          width: parseInt(parts[0], 10),
+          height: parseInt(parts[1], 10),
+          pixel_ratio: dpr,
+        };
+      }
+    }
+  }
+
+  /**
+   * Heuristic: MLX cloud launcher refused the Bearer / automation session (manual app works because it uses GUI login, not necessarily the API token).
+   * @private
+   */
+  _launcherMessageSuggestsTokenRejection(parsed) {
+    if (!parsed || parsed.code === 0 || parsed.code === -6) return false;
+    const m = String(parsed.message || '').toLowerCase();
+    const needles = [
+      'profile authorization',
+      'authorization error',
+      'unauthorized',
+      'invalid token',
+      'invalid jwt',
+      'token expired',
+      'access denied',
+      'wrong token',
+      'authentication required',
+      'not authenticated',
+      'bearer',
+      'forbidden',
+    ];
+    return needles.some((n) => m.includes(n));
+  }
+
+  /**
+   * One screen-friendly block for operators (logs + API message field).
+   * @private
+   */
+  _buildLauncherAuthFailureMessage(originalMessage, extra = {}) {
+    const { refreshFailed, afterPasswordRefreshRetry } = extra;
+    const parts = [
+      String(originalMessage || 'Multilogin launcher refused this request').trim(),
+      'Why: The Automation API Bearer token is missing, expired, revoked, or not allowed for this workspace/profile; the Multilogin desktop app can still open profiles using its own login — that does not prove the API token is valid.',
+      'Do: (1) Multilogin X → Workspace → generate a new Automation API token → paste into app Settings / MULTILOGIN_TOKEN in .env. (2) Or set MULTILOGIN_EMAIL + MULTILOGIN_PASSWORD so the server can sign in once and mint a fresh automation token (saved to .env when possible). (3) Verify MULTILOGIN_FOLDER_ID matches the folder that contains this profile UUID. (4) Keep Multilogin logged into the same account as the API token.',
+    ];
+    if (refreshFailed) {
+      parts.push(`Token refresh failed: ${refreshFailed}. No further automatic retry this call.`);
+    } else if (afterPasswordRefreshRetry) {
+      parts.push('After one automatic sign-in + retry, launcher still failed — check folder ID, profile ownership, and generate a new automation token in the Multilogin UI.');
+    } else {
+      parts.push('Automatic retry: if email/password are configured, the server will try one cloud sign-in and re-hit the launcher once.');
+    }
+    return parts.join(' | ');
+  }
+
   /**
    * Make an authenticated request to the Multilogin Launcher (local).
    * Uses HTTPS with rejectUnauthorized: false for self-signed cert.
@@ -344,39 +672,65 @@ class MultiloginProvider extends BrowserProvider {
 
     const url = `${LAUNCHER_BASE}${endpoint}`;
 
-    // STRATEGY: Try launcher WITHOUT auth first (Multilogin launcher manages its own
-    // session internally when the app is running & logged in — cloud token not required).
-    // Only fall back to cloud auth if launcher explicitly returns 401.
+    // STRATEGY: Send launcher request with Bearer when we have token.
+    // HTTP 401 OR body "Profile Authorization" → refresh token (password-first) once, retry once.
     try {
-      const noAuthHeaders = { 'Content-Type': 'application/json' };
-
-      // If we already have a valid token, include it — but don't block on re-auth
-      if (this.token && Date.now() < this.tokenExpiresAt) {
-        noAuthHeaders['Authorization'] = `Bearer ${this.token}`;
-      }
-
-      const response = await this._makeLauncherRequest(url, {
-        method, headers: noAuthHeaders, body, timeout,
-      });
-
-      // Launcher returned 401 — try cloud auth once
-      if (response.statusCode === 401) {
-        console.log('[multilogin] Launcher returned 401 — attempting cloud auth...');
-        const authResult = await this.authenticate();
-        if (authResult.code !== 0) {
-          return this._errorResponse(-4, `Launcher requires auth but cloud signin failed: ${authResult.message}`);
+      const sendToLauncher = async () => {
+        const headers = { 'Content-Type': 'application/json' };
+        if (this.token && Date.now() < this.tokenExpiresAt) {
+          headers.Authorization = `Bearer ${this.token}`;
         }
-        const authHeaders = {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.token}`,
-        };
-        const retryResponse = await this._makeLauncherRequest(url, {
-          method, headers: authHeaders, body, timeout,
+
+        const response = await this._makeLauncherRequest(url, {
+          method, headers, body, timeout,
         });
-        return this._parseLauncherResponse(retryResponse);
+
+        if (response.statusCode === 401) {
+          console.log('[multilogin] Launcher returned HTTP 401 — refreshToken() then retry with Bearer...');
+          const refresh = await this.refreshToken();
+          if (refresh.code !== 0) {
+            return this._errorResponse(
+              -4,
+              this._buildLauncherAuthFailureMessage(
+                `Launcher HTTP 401; could not refresh API token: ${refresh.message}`,
+                { refreshFailed: refresh.message },
+              ),
+            );
+          }
+          const authHeaders = {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.token}`,
+          };
+          const retryResponse = await this._makeLauncherRequest(url, {
+            method, headers: authHeaders, body, timeout,
+          });
+          return this._parseLauncherResponse(retryResponse);
+        }
+
+        return this._parseLauncherResponse(response);
+      };
+
+      let parsed = await sendToLauncher();
+
+      if (parsed.code !== 0 && this._launcherMessageSuggestsTokenRejection(parsed)) {
+        console.warn('[multilogin] Launcher auth/session message — refreshToken() once and retry launcher...');
+        const refresh = await this.refreshToken();
+        if (refresh.code !== 0) {
+          return this._errorResponse(
+            -4,
+            this._buildLauncherAuthFailureMessage(parsed.message, { refreshFailed: refresh.message }),
+          );
+        }
+        parsed = await sendToLauncher();
+        if (parsed.code !== 0 && this._launcherMessageSuggestsTokenRejection(parsed)) {
+          return this._errorResponse(
+            -4,
+            this._buildLauncherAuthFailureMessage(parsed.message, { afterPasswordRefreshRetry: true }),
+          );
+        }
       }
 
-      return this._parseLauncherResponse(response);
+      return parsed;
     } catch (error) {
       // Launcher-specific connection error
       if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' ||
@@ -397,12 +751,18 @@ class MultiloginProvider extends BrowserProvider {
    * Calls https://profile-proxy.multilogin.com/v1/proxy/connection_url
    * Returns host:port:username:password parsed into object.
    *
-   * @param {string} [country='us'] - Country code (us, gb, de, etc.)
+   * @param {string} [country='us'] - Country code (us or gb only)
    * @param {string} [city=''] - City name (optional)
    * @param {string} [region=''] - Region/state name (optional)
    * @returns {Promise<{success: boolean, proxy?: object, error?: string}>}
    */
   async _generateMultiloginProxy(country = 'us', city = '', region = '') {
+    const requested = String(country || 'us').toLowerCase();
+    country = normalizeProxyCountry(country);
+    if (requested !== country && requested !== 'uk') {
+      console.warn(`[multilogin] Proxy country "${requested}" blocked — using ${country} (US/UK only)`);
+    }
+
     const auth = await this.getAuthHeaders();
     if (auth.error) {
       return { success: false, error: auth.error.message || 'Auth failed' };
@@ -541,17 +901,44 @@ class MultiloginProvider extends BrowserProvider {
       fingerprint.timezone = { zone: config.timezone };
     }
 
-    // language.list — Multilogin X uses array format
+    // language — Cloud API uses list; Quick v3 also accepts localization block
     if (config.language) {
-      fingerprint.language = { list: [config.language] };
+      const lang = config.language;
+      const base = lang.split('-')[0];
+      fingerprint.language = { list: [lang] };
+      fingerprint.localization = {
+        languages: lang,
+        locale: lang,
+        accept_languages: `${lang},${base};q=0.9`,
+      };
     }
 
-    // geolocation — skipped intentionally; proxy provides geographic routing.
-    // Multilogin X geolocation fingerprint requires many fields (public_ip, etc.)
-    // and causes validation errors. The proxy's exit IP already sets location.
+    // WebGL vendor/renderer metadata (Quick: graphic; seeds in webgl)
+    if (config.webGLMeta && (config.webGLMeta.vendor || config.webGLMeta.renderer)) {
+      fingerprint.graphic = {
+        vendor: config.webGLMeta.vendor || '',
+        renderer: config.webGLMeta.renderer || '',
+      };
+    }
 
-    // webrtc — ANY webrtc field requires public_ip which we can't know for residential proxies
-    // Skip entirely; Multilogin uses its own default webrtc handling
+    // WebGPU device IDs (optional, OS-specific)
+    if (config.webGPU && (config.webGPU.vendor || config.webGPU.adapter)) {
+      fingerprint.webgpu = {
+        vendor: config.webGPU.vendor || '',
+        adapter: config.webGPU.adapter || '',
+      };
+    }
+
+    // Media device counts — mic/cam/speaker enumeration fingerprint
+    if (config.mediaDevices) {
+      fingerprint.media_devices = {
+        audio_inputs: config.mediaDevices.audioInputs ?? 1,
+        audio_outputs: config.mediaDevices.audioOutputs ?? 2,
+        video_inputs: config.mediaDevices.videoInputs ?? 1,
+      };
+    }
+
+    // Geolocation + WebRTC: use flags `mask` — MLX aligns with proxy exit IP (no public_ip)
 
     // canvas (mode + seed)
     if (config.canvasNoise && config.canvasNoise.seed) {
@@ -625,69 +1012,134 @@ class MultiloginProvider extends BrowserProvider {
    * @returns {Promise<{success: boolean, proxy?: object, error?: string}>}
    */
   async _resolveProxy(proxyOptions, apiFormat = 'cloud') {
-    if (!proxyOptions) return { success: true, proxy: null };
+    if (!proxyOptions) return { success: true, proxy: null, source: 'none' };
 
-    // SmartProxy — read credentials from .env (PROXY_SERVER, PROXY_PORT, PROXY_PREFIX, PROXY_PASSWORD)
-    if (proxyOptions.type === 'smartproxy') {
-      const server   = process.env.PROXY_SERVER   || 'us.smartproxy.net';
-      const port     = parseInt(process.env.PROXY_PORT || '3120', 10);
-      const prefix   = process.env.PROXY_PREFIX   || '';
-      const password = process.env.PROXY_PASSWORD  || '';
-      const sessionId = Math.random().toString(36).slice(2, 12);
-      const country  = proxyOptions.country || 'us';
-      const username = `${prefix}_country-${country}_session-${sessionId}`;
-      console.log(`[multilogin] Using SmartProxy: ${server}:${port}`);
-      if (apiFormat === 'quick') {
-        return { success: true, proxy: { host: server, port, username, password, type: 'http' } };
+    const explicitType = proxyOptions.type;
+
+    // Multilogin residential — ALWAYS generate MLX proxy (never SmartProxy .env)
+    if (isMultiloginProxyType(explicitType)) {
+      console.log('[multilogin] Resolving Multilogin residential proxy (built-in)...');
+      const requested = String(proxyOptions.country || 'us').toLowerCase();
+      const country = normalizeProxyCountry(proxyOptions.country, !proxyOptions.country);
+      if (requested && requested !== country && requested !== 'uk') {
+        console.warn(`[multilogin] Proxy country "${requested}" blocked — using ${country} (US/UK only)`);
       }
-      return { success: true, proxy: { host: server, port, username, password, type: 'HTTP' } };
-    }
-
-    // Multilogin residential proxy — generate credentials first
-    if (proxyOptions.type === 'multilogin_residential') {
-      console.log('[multilogin] Generating Multilogin residential proxy...');
-      const country = proxyOptions.country || 'us';
-      const city    = proxyOptions.city    || '';
-      const region  = proxyOptions.region  || '';
-      const result  = await this._generateMultiloginProxy(country, city, region);
+      const city = proxyOptions.city || '';
+      const region = proxyOptions.region || '';
+      const result = await this._generateMultiloginProxy(country, city, region);
       if (!result.success) {
-        return { success: false, error: `Multilogin proxy generation failed: ${result.error}` };
+        return { success: false, error: `Multilogin proxy generation failed: ${result.error}`, source: 'multilogin' };
       }
       const p = result.proxy;
-      if (apiFormat === 'quick') {
-        // Quick Profile API uses lowercase socks5 at root level
-        return { success: true, proxy: { host: p.host, port: p.port, username: p.username, password: p.password, type: 'socks5' } };
-      }
-      // Cloud API uses uppercase type inside parameters.proxy
-      return { success: true, proxy: { host: p.host, port: p.port, username: p.username, password: p.password, type: 'SOCKS5' } };
-    }
-
-    // SmartProxy or external proxy — use provided credentials directly
-    const rawType = (proxyOptions.protocol || proxyOptions.type || 'http').toLowerCase();
-    if (apiFormat === 'quick') {
+      const proxyType = apiFormat === 'quick' ? 'socks5' : 'SOCKS5';
+      console.log(`[multilogin] Multilogin proxy ready: ${p.host}:${p.port} (${country.toUpperCase()})`);
       return {
         success: true,
+        source: 'multilogin',
         proxy: {
-          host: proxyOptions.server || proxyOptions.host,
-          port: Number(proxyOptions.port),
-          username: proxyOptions.username || '',
-          password: proxyOptions.password || '',
-          type: rawType, // lowercase for Quick Profile API
+          host: p.host,
+          port: p.port,
+          username: p.username,
+          password: p.password,
+          type: proxyType,
         },
       };
     }
-    // Cloud API: uppercase type
-    const typeMap = { http: 'HTTP', https: 'HTTPS', socks5: 'SOCKS5', socks4: 'SOCKS4' };
-    return {
-      success: true,
-      proxy: {
-        host: proxyOptions.server || proxyOptions.host,
-        port: Number(proxyOptions.port),
-        username: proxyOptions.username || '',
-        password: proxyOptions.password || '',
-        type: typeMap[rawType] || 'HTTP',
-      },
-    };
+
+    // SmartProxy — explicit type OR legacy credential object from ProfileCreator
+    const hostHint = proxyOptions.server || proxyOptions.host || '';
+    const wantsSmartProxy = isSmartProxyType(explicitType)
+      || (!explicitType && isSmartProxyHost(hostHint))
+      || (!explicitType && proxyOptions.username && proxyOptions.password && !isMultiloginProxyHost(hostHint));
+
+    if (wantsSmartProxy && !isMultiloginProxyType(explicitType)) {
+      if (proxyOptions.server && proxyOptions.port && proxyOptions.username && proxyOptions.password) {
+        const rawType = (proxyOptions.protocol || 'http').toLowerCase();
+        const typeMap = { http: 'HTTP', https: 'HTTPS', socks5: 'SOCKS5', socks4: 'SOCKS4' };
+        const quickType = rawType === 'socks5' ? 'socks5' : 'http';
+        console.log(`[multilogin] Using SmartProxy credentials: ${proxyOptions.server}:${proxyOptions.port}`);
+        if (apiFormat === 'quick') {
+          return {
+            success: true,
+            source: 'smartproxy',
+            proxy: {
+              host: proxyOptions.server,
+              port: Number(proxyOptions.port),
+              username: proxyOptions.username,
+              password: proxyOptions.password,
+              type: quickType,
+            },
+          };
+        }
+        return {
+          success: true,
+          source: 'smartproxy',
+          proxy: {
+            host: proxyOptions.server,
+            port: Number(proxyOptions.port),
+            username: proxyOptions.username,
+            password: proxyOptions.password,
+            type: typeMap[rawType] || 'HTTP',
+          },
+        };
+      }
+
+      const server = process.env.PROXY_SERVER || 'us.smartproxy.net';
+      const port = parseInt(process.env.PROXY_PORT || '3120', 10);
+      const prefix = process.env.PROXY_PREFIX || '';
+      const password = process.env.PROXY_PASSWORD || '';
+      if (!password || !prefix) {
+        return { success: false, error: 'Smartproxy credentials missing — set PROXY_PASSWORD and PROXY_PREFIX in Settings or .env', source: 'smartproxy' };
+      }
+      const sessionId = Math.random().toString(36).slice(2, 12);
+      const lifeMin = parseInt(process.env.PROXY_LIFE_MINUTES || '120', 10);
+      const username = `${prefix}_area-US_life-${lifeMin}_session-${sessionId}`;
+      console.log(`[multilogin] Using SmartProxy from env: ${server}:${port}`);
+      if (apiFormat === 'quick') {
+        return { success: true, source: 'smartproxy', proxy: { host: server, port, username, password, type: 'http' } };
+      }
+      return { success: true, source: 'smartproxy', proxy: { host: server, port, username, password, type: 'HTTP' } };
+    }
+
+    // External/custom proxy with host+port (must not be SmartProxy when Multilogin was requested)
+    const host = proxyOptions.server || proxyOptions.host;
+    if (host && proxyOptions.port) {
+      if (isMultiloginProxyType(explicitType) && isSmartProxyHost(host)) {
+        return {
+          success: false,
+          error: 'Multilogin proxy requested but SmartProxy host was supplied — check proxyType parameter',
+          source: 'error',
+        };
+      }
+      const rawType = (proxyOptions.protocol || proxyOptions.type || 'http').toLowerCase();
+      if (apiFormat === 'quick') {
+        return {
+          success: true,
+          source: 'custom',
+          proxy: {
+            host,
+            port: Number(proxyOptions.port),
+            username: proxyOptions.username || '',
+            password: proxyOptions.password || '',
+            type: rawType,
+          },
+        };
+      }
+      const typeMap = { http: 'HTTP', https: 'HTTPS', socks5: 'SOCKS5', socks4: 'SOCKS4' };
+      return {
+        success: true,
+        source: 'custom',
+        proxy: {
+          host,
+          port: Number(proxyOptions.port),
+          username: proxyOptions.username || '',
+          password: proxyOptions.password || '',
+          type: typeMap[rawType] || 'HTTP',
+        },
+      };
+    }
+
+    return { success: false, error: 'Invalid proxy options — set type to multilogin or smartproxy', source: 'error' };
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -727,8 +1179,12 @@ class MultiloginProvider extends BrowserProvider {
       folder_id: this.folderId,
       browser_type: browserType,
       os_type: osType,
+      core_version: this._getCoreVersion(),
       name: (options && options.name) || `Profile ${Date.now()}`,
-      parameters: {},
+      parameters: {
+        flags: this._defaultCloudFlags(proxyResult.proxy ? 'custom' : 'disabled'),
+        storage: this._defaultCloudStorage(),
+      },
     };
 
     // Add resolved proxy
@@ -736,41 +1192,22 @@ class MultiloginProvider extends BrowserProvider {
       body.parameters.proxy = proxyResult.proxy;
     }
 
-    // ── Navigator: user agent + hardware concurrency + device memory ──
-    // Set for ALL OS types so every Cloud profile gets a unique, OS-correct UA.
-    if (options && options.fingerprint && options.fingerprint.userAgent) {
-      const fp = options.fingerprint;
-      const platformMap = { windows: 'Win32', macos: 'MacIntel', android: 'Linux armv8l' };
-      const rawRam   = fp.ram || 8;
-      const devMemory = rawRam >= 16 ? 8 : rawRam >= 8 ? 8 : rawRam >= 4 ? 4 : 2;
-      body.parameters.navigator = {
-        user_agent:           fp.userAgent,
-        hardware_concurrency: fp.cpu  || 4,
-        device_memory:        devMemory,
-        platform:             platformMap[osType] || 'Win32',
-      };
-      console.log(`[multilogin] createProfile (Cloud) → UA: ${fp.userAgent.slice(0, 70)}...`);
+    this._applyFingerprintToCloudBody(body, options, osType);
+
+    if (options && options.fingerprint && options.fingerprint.userAgent && !body.parameters.navigator) {
+      console.log(`[multilogin] createProfile (Cloud) → UA: ${options.fingerprint.userAgent.slice(0, 70)}...`);
+    }
+    if (options && options.fingerprint && options.fingerprint.resolution && body.parameters.screen) {
+      console.log(`[multilogin] createProfile (Cloud) → screen: ${options.fingerprint.resolution} @ ${body.parameters.screen.pixel_ratio}x`);
     }
 
-    // ── Screen: required for Android (Multilogin rejects pixel_ratio=1 for mobile) ──
-    if (options && options.fingerprint && options.fingerprint.resolution) {
-      const fp    = options.fingerprint;
-      const parts = String(fp.resolution).split('x');
-      if (parts.length === 2) {
-        // For Android always use the device's real DPR. For desktop default to 1.
-        const dpr = fp.pixelRatio || (osType === 'android' ? 2.625 : 1);
-        body.parameters.screen = {
-          width:       parseInt(parts[0], 10),
-          height:      parseInt(parts[1], 10),
-          pixel_ratio: dpr,
-        };
-        console.log(`[multilogin] createProfile (Cloud) → screen: ${fp.resolution} @ ${dpr}x`);
-      }
+    console.log(`[multilogin] createProfile (Cloud) → proxy: ${proxyResult.proxy ? proxyResult.proxy.host + ':' + proxyResult.proxy.port + ' (' + (proxyResult.source || 'unknown') + ')' : 'none'}`);
+
+    if (isMultiloginProxyType(options?.proxy?.type) && proxyResult.proxy && isSmartProxyHost(proxyResult.proxy.host)) {
+      return this._errorResponse(-6, 'Multilogin proxy requested but SmartProxy was resolved — profile not created');
     }
 
-    console.log(`[multilogin] createProfile (Cloud) → proxy: ${proxyResult.proxy ? proxyResult.proxy.host + ':' + proxyResult.proxy.port : 'none'}`);
-
-    const result = await this._authenticatedCloudRequest('/profile/create', { body });
+    let result = await this._authenticatedCloudRequestWithRetry('/profile/create', { body }, 5);
 
     if (result.code === 0 && result.data) {
       const newId = (result.data.ids && result.data.ids[0])
@@ -778,15 +1215,67 @@ class MultiloginProvider extends BrowserProvider {
         || result.data.uuid
         || '';
       console.log(`[multilogin] Cloud profile created: ${newId}`);
-      return this._successResponse('Profile created successfully', { id: newId });
+      return this._successResponse('Profile created successfully', {
+        id: newId,
+        proxyUsed: proxyResult.proxy || null,
+        proxySource: proxyResult.source || null,
+      });
+    }
+
+    // Cloud /profile/create often returns HTTP 501 after MLX platform updates — try clone fallback
+    if (this._isCloud501Message(result.message)) {
+      console.warn('[multilogin] Cloud create unavailable (501) — trying clone fallback...');
+      const cloned = await this.cloneProfile(options, proxyResult);
+      if (cloned.code === 0) return cloned;
+
+      return this._errorResponse(-1,
+        'Multilogin cloud profile/create is down (HTTP 501). '
+        + 'Create a profile manually in Multilogin X app → Refresh here, '
+        + 'or use Quick/Local mode (Multilogin desktop must be running). '
+        + 'Clone fallback also failed: ' + (cloned.message || 'unknown'));
     }
 
     return result;
   }
 
   /**
-   * Create a QUICK profile via Local Launcher API.
-   * POST https://launcher.mlx.yt:45001/api/v2/profile/quick
+   * Build launcher v3 quick-profile body (MLX 12+ — v2 is deprecated).
+   * @private
+   */
+  _buildQuickProfileV3Body(options, proxyResult, osType, includeProxy) {
+    const { flags, fingerprint: fingerprintPayload } = this._buildAntidetectParameters(options, includeProxy);
+
+    const body = {
+      browser_type: (options && options.browserType === 'stealthfox') ? 'stealthfox' : 'mimic',
+      os_type: osType,
+      core_version: this._getCoreVersion(),
+      is_headless: false,
+      automation: 'playwright',
+      parameters: {
+        flags,
+        fingerprint: fingerprintPayload,
+        storage: this._defaultCloudStorage(),
+      },
+    };
+
+    if (includeProxy && proxyResult && proxyResult.success && proxyResult.proxy) {
+      const p = proxyResult.proxy;
+      body.parameters.proxy = {
+        host: p.host,
+        port: Number(p.port),
+        username: p.username || '',
+        password: p.password || '',
+        type: (p.type || 'http').toLowerCase(),
+        save_traffic: false,
+      };
+    }
+
+    return body;
+  }
+
+  /**
+   * Create a QUICK profile via Local Launcher API v3.
+   * POST https://launcher.mlx.yt:45001/api/v3/profile/quick
    *
    * Supports full fingerprint flags + both SmartProxy AND Multilogin residential proxy.
    * NOTE: Quick profiles are session-based — they disappear when closed.
@@ -806,37 +1295,28 @@ class MultiloginProvider extends BrowserProvider {
     const osMap = { Windows: 'windows', macOS: 'macos', Android: 'android', Linux: 'linux' };
     const osType = (options && options.os && osMap[options.os]) || 'windows';
 
-    // Build fingerprint payload
-    let fingerprintPayload = {};
-    if (options && options.fingerprint) {
-      const fpConfig = { ...options.fingerprint, os: options.os };
-      fingerprintPayload = this.buildFingerprintPayload(fpConfig);
+    const hasProxy = !!(proxyResult.proxy && proxyResult.proxy.host);
+    let body = this._buildQuickProfileV3Body(options, proxyResult, osType, hasProxy);
+
+    console.log(`[multilogin] createQuickProfile (v3) → proxy: ${hasProxy ? proxyResult.proxy.host + ':' + proxyResult.proxy.port + ' (' + (proxyResult.source || 'unknown') + ')' : 'none'}`);
+
+    if (isMultiloginProxyType(options?.proxy?.type) && proxyResult.proxy && isSmartProxyHost(proxyResult.proxy.host)) {
+      return this._errorResponse(-6, 'Multilogin proxy requested but SmartProxy was resolved — quick profile not created');
     }
 
-    // Quick Profile body structure (proxy at ROOT level, not inside parameters)
-    const body = {
-      browser_type: 'mimic',
-      os_type: osType,
-      is_headless: false,
-      parameters: {
-        flags: this.buildFlagsFromConfig(options && options.fingerprintConfig),
-        fingerprint: fingerprintPayload,
-      },
-    };
-
-    // Proxy goes at ROOT level for Quick Profile API
-    if (proxyResult.proxy) {
-      body.proxy = proxyResult.proxy;
-    }
-
-    console.log(`[multilogin] createQuickProfile (Local) → proxy: ${proxyResult.proxy ? proxyResult.proxy.host + ':' + proxyResult.proxy.port : 'none'}`);
-    console.log(`[multilogin] Quick profile flags: canvas_noise=${body.parameters.flags.canvas_noise}, timezone=${body.parameters.flags.timezone_masking}`);
-
-    const result = await this._launcherRequest('/api/v2/profile/quick', {
+    const result = await this._launcherRequest('/api/v3/profile/quick', {
       method: 'POST',
       body,
       timeout: START_TIMEOUT,
     });
+
+    if (result.code !== 0 && hasProxy) {
+      return this._errorResponse(
+        result.code || -1,
+        (result.message || 'Quick profile with proxy failed')
+          + ' — profile was NOT created without proxy (real IP blocked). Use Cloud mode or fix SmartProxy credentials.'
+      );
+    }
 
     if (result.code === 0 && result.data) {
       const cdpPort = result.data.port || result.data.cdp_port || result.data.cdpPort;
@@ -926,6 +1406,9 @@ class MultiloginProvider extends BrowserProvider {
         console.error('[MultiloginProvider] Launcher response missing CDP port field. data:', JSON.stringify(result.data));
         return this._errorResponse(-1, 'Profile started but no CDP port in launcher response. Automation cannot attach — close profile in MLX and retry.');
       }
+      // Persist CDP port so stopProfile (and UI Stop button) can find it later
+      this._saveCdpPort(profileId, cdpPort);
+
       return this._successResponse('Profile started successfully', {
         profileId: profileId,
         cdpPort,
@@ -938,9 +1421,9 @@ class MultiloginProvider extends BrowserProvider {
       (result.message && /browser process is running|already running|already open/i.test(result.message));
 
     if (alreadyRunning) {
-      console.log(`[MultiloginProvider] Profile ${profileId.slice(-4)} already open — trying direct CDP port via status...`);
+      console.log(`[MultiloginProvider] Profile ${profileId.slice(-4)} already open — recovering...`);
 
-      // Strategy 1: Try launcher status endpoint to get running profile's CDP port
+      // Strategy 1: Try launcher status to get CDP port of already-running profile
       try {
         const statusResult = await this._launcherRequest(
           `/api/v2/profile/f/${this.folderId}/p/${profileId}`,
@@ -949,71 +1432,379 @@ class MultiloginProvider extends BrowserProvider {
         if (statusResult.code === 0 && statusResult.data) {
           const { cdpPort, cdpEndpoint } = this._extractCdpFromLauncherData(statusResult.data);
           if (cdpPort && cdpEndpoint) {
-            console.log(`[MultiloginProvider] Got CDP port ${cdpPort} from status for already-running profile`);
-            return this._successResponse('Profile already running — attached to existing CDP', { profileId, cdpPort, cdpEndpoint });
+            console.log(`[MultiloginProvider] CDP port ${cdpPort} from status`);
+            this._saveCdpPort(profileId, cdpPort);
+            return this._successResponse('Attached to running profile', { profileId, cdpPort, cdpEndpoint });
           }
         }
       } catch {}
 
-      // Strategy 2: Stop then restart after short wait
-      console.log(`[MultiloginProvider] Status failed — stopping profile ${profileId.slice(-4)} and restarting...`);
-      await this.stopProfile(profileId);
-      await new Promise((r) => setTimeout(r, 4000));
+      // Strategy 2: Stop via v1, wait, restart
+      console.log(`[MultiloginProvider] Stopping profile ${profileId.slice(-4)} and restarting...`);
+      try {
+        const q = `/api/v1/profile/stop?profile_id=${encodeURIComponent(profileId)}`;
+        let st = await this._launcherRequest(q, { method: 'GET', timeout: STOP_TIMEOUT });
+        if (st.code !== 0) {
+          st = await this._launcherRequest(`/api/v1/profile/stop/p/${profileId}`, { method: 'GET', timeout: STOP_TIMEOUT });
+        }
+      } catch {}
+      await new Promise((r) => setTimeout(r, 5000));
+
       const retry = await this._launcherRequest(endpoint, { timeout: START_TIMEOUT });
       if (retry.code === 0 && retry.data) {
         const { cdpPort, cdpEndpoint } = this._extractCdpFromLauncherData(retry.data);
         if (cdpPort && cdpEndpoint) {
-          return this._successResponse('Profile started successfully (after stop+retry)', { profileId, cdpPort, cdpEndpoint });
+          return this._successResponse('Profile started (after stop+retry)', { profileId, cdpPort, cdpEndpoint });
         }
       }
 
-      return this._errorResponse(-6, 'Profile is open in Multilogin but CDP port could not be determined. Close it manually in Multilogin app and retry.');
+      // Strategy 3: Stale state — check if actual browser process is running by scanning CDP ports
+      // If no browser found, the Multilogin state is stale (zombie). Wait 10s and force-retry.
+      console.log(`[MultiloginProvider] Stale state detected — waiting 10s for Multilogin to clear and retrying...`);
+      await new Promise((r) => setTimeout(r, 10000));
+      const forceRetry = await this._launcherRequest(endpoint, { timeout: START_TIMEOUT });
+      if (forceRetry.code === 0 && forceRetry.data) {
+        const { cdpPort, cdpEndpoint } = this._extractCdpFromLauncherData(forceRetry.data);
+        if (cdpPort && cdpEndpoint) {
+          return this._successResponse('Profile started (force retry)', { profileId, cdpPort, cdpEndpoint });
+        }
+      }
+
+      return this._errorResponse(-6, 'Profile is open in Multilogin but CDP port could not be determined. Please close the profile manually in Multilogin app and retry.');
     }
 
     return result;
   }
 
-  /**
-   * Stop a running browser profile via Multilogin Launcher
-   * GET https://launcher.mlx.yt:45001/api/v1/profile/stop?profile_id={profileId}
-   * 
-   * @param {string} profileId - Multilogin profile_id
-   * @returns {Promise<{code: number, message: string, data: object|null}>}
-   */
-  async stopProfile(profileId) {
-    // Playwright's browser.close() (called in agent.disconnect()) already sends
-    // Browser.close via CDP which terminates the Chrome process. The launcher stop
-    // endpoint (/api/v1/profile/stop) returns 404 in current Multilogin versions —
-    // treat any non-0 / 404 response as success since the process is already gone.
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // CDP PORT CACHE (for reliable stop after automation)
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  _cdpCachePath() {
+    const path = require('path');
+    return path.join(__dirname, '..', 'data', 'cdp_ports.json');
+  }
+
+  _readCdpCache() {
+    const fs = require('fs');
     try {
-      const endpoint = `/api/v1/profile/stop?profile_id=${encodeURIComponent(profileId)}`;
-      const result = await this._launcherRequest(endpoint, { method: 'GET', timeout: STOP_TIMEOUT });
-      if (result.code === 0) {
-        return this._successResponse('Profile stopped successfully', { profileId });
-      }
-      // 404 or "not found" = profile already closed by browser.close() — treat as success
-      return this._successResponse('Profile closed (browser.close handled termination)', { profileId });
-    } catch (err) {
-      return this._successResponse('Profile closed (browser.close handled termination)', { profileId });
+      const raw = fs.readFileSync(this._cdpCachePath(), 'utf8');
+      const parsed = JSON.parse(raw || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
     }
+  }
+
+  _saveCdpPort(profileId, cdpPort) {
+    if (!profileId || !cdpPort) return;
+    const fs = require('fs');
+    const path = require('path');
+    try {
+      const file = this._cdpCachePath();
+      const dir = path.dirname(file);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const cache = this._readCdpCache();
+      cache[profileId] = cdpPort;
+      fs.writeFileSync(file, JSON.stringify(cache, null, 2));
+    } catch (err) {
+      console.warn('[multilogin] Could not save CDP port cache:', err.message);
+    }
+  }
+
+  _removeCdpFromCache(profileId) {
+    const fs = require('fs');
+    try {
+      const file = this._cdpCachePath();
+      const cache = this._readCdpCache();
+      if (!cache[profileId]) return;
+      delete cache[profileId];
+      fs.writeFileSync(file, JSON.stringify(cache, null, 2));
+    } catch { /* ignore */ }
+  }
+
+  async _closeBrowserViaCdp(port) {
+    if (!port || port <= 0) return false;
+    try {
+      const { chromium } = require('playwright-core');
+      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 5000 });
+      await browser.close();
+      console.log(`[multilogin] stopProfile: Closed via CDP port ${port}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async _isProfileRunningOnLauncher(profileId) {
+    if (!this.folderId) return null;
+    try {
+      const statusResult = await this._launcherRequest(
+        `/api/v2/profile/f/${this.folderId}/p/${profileId}`,
+        { method: 'GET', timeout: DEFAULT_TIMEOUT },
+      );
+      if (statusResult.code !== 0 || !statusResult.data) return null;
+      const { cdpPort } = this._extractCdpFromLauncherData(statusResult.data);
+      const rawStatus = String(statusResult.data.status || statusResult.data.state || '').toLowerCase();
+      if (cdpPort > 0) return true;
+      if (/running|started|active|automation/.test(rawStatus)) return true;
+      if (/stopped|idle|closed/.test(rawStatus)) return false;
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Stop a running browser profile via Multilogin Launcher (primary) + CDP fallback.
+   * @param {string} profileId
+   * @param {{ cdpPort?: number }} [options] - Known CDP port from worker (fastest close path)
+   */
+  async stopProfile(profileId, options = {}) {
+    const hintPort = parseInt(options.cdpPort, 10) || null;
+    const cache = this._readCdpCache();
+    const cachedPort = parseInt(cache[profileId], 10) || null;
+    const portsToTry = [...new Set([hintPort, cachedPort].filter((p) => p && p > 0))];
+
+    let launcherStopped = false;
+    const pidEnc = encodeURIComponent(profileId);
+
+    /** Order: Postman‑documented v1 query → path form (help examples) → v2 folder stop (matches v2 start) → force */
+    const stopEndpoints = [
+      `/api/v1/profile/stop?profile_id=${pidEnc}`,
+      `/api/v1/profile/stop/p/${profileId}`,
+    ];
+    if (this.folderId) {
+      stopEndpoints.push(`/api/v2/profile/f/${this.folderId}/p/${profileId}/stop`);
+    }
+    stopEndpoints.push(`/api/v1/profile/stop?profile_id=${pidEnc}&force=true`);
+
+    for (const endpoint of stopEndpoints) {
+      try {
+        const result = await this._launcherRequest(endpoint, { method: 'GET', timeout: STOP_TIMEOUT });
+        if (result.code === 0) {
+          launcherStopped = true;
+          console.log(`[multilogin] stopProfile OK via ${endpoint.split('?')[0]}`);
+          break;
+        }
+        console.warn(`[multilogin] stopProfile ${endpoint}: code=${result.code} ${result.message || ''}`);
+      } catch (err) {
+        console.warn(`[multilogin] stopProfile ${endpoint}: ${err.message}`);
+      }
+    }
+
+    await sleep(1500);
+
+    let stillRunning = await this._isProfileRunningOnLauncher(profileId);
+    if (stillRunning === true && portsToTry.length) {
+      for (const port of portsToTry) {
+        await this._closeBrowserViaCdp(port);
+      }
+      await sleep(1200);
+      stillRunning = await this._isProfileRunningOnLauncher(profileId);
+    }
+
+    if (stillRunning === false || launcherStopped) {
+      this._removeCdpFromCache(profileId);
+      return this._successResponse('Profile stopped successfully', { profileId, launcherStopped, verified: stillRunning === false });
+    }
+
+    if (launcherStopped && stillRunning === null) {
+      this._removeCdpFromCache(profileId);
+      return this._successResponse('Profile stop sent (status unverified)', { profileId, launcherStopped, verified: false });
+    }
+
+    this._removeCdpFromCache(profileId);
+    return this._errorResponse(-1, 'Could not stop profile — browser may still be open in Multilogin');
+  }
+
+  /**
+   * Build /profile/remove body (supports legacy `ids` + documented `profile_ids`).
+   * @private
+   */
+  _buildRemoveBody(profileIds, permanently = false) {
+    const ids = (Array.isArray(profileIds) ? profileIds : [profileIds])
+      .filter(Boolean)
+      .map(String);
+    return {
+      profile_ids: ids,
+      ids,
+      permanently: !!permanently,
+    };
+  }
+
+  /**
+   * Remove one or more profiles (soft delete → trash, or permanent purge).
+   * @private
+   */
+  async _removeProfiles(profileIds, permanently = false) {
+    const body = this._buildRemoveBody(profileIds, permanently);
+    if (!body.profile_ids.length) {
+      return this._errorResponse(-5, 'No profile IDs provided');
+    }
+    return this._authenticatedCloudRequest('/profile/remove', { body });
   }
 
   /**
    * Delete a browser profile via Multilogin Cloud API
    * POST https://api.multilogin.com/profile/remove
-   * 
-   * @param {string} profileId - Multilogin profile_id
+   *
+   * @param {string|string[]} profileId - Multilogin profile_id(s)
+   * @param {{ permanently?: boolean }} [options] - permanently=true skips trash / purges from trash
    * @returns {Promise<{code: number, message: string, data: object|null}>}
    */
-  async deleteProfile(profileId) {
-    const body = { ids: [profileId] };
-    const result = await this._authenticatedCloudRequest('/profile/remove', { body });
+  async deleteProfile(profileId, options = {}) {
+    const permanently = options.permanently === true;
+    const result = await this._removeProfiles(profileId, permanently);
 
     if (result.code === 0) {
-      return this._successResponse('Profile deleted successfully', { profileId });
+      const ids = this._buildRemoveBody(profileId, permanently).profile_ids;
+      return this._successResponse(
+        permanently ? 'Profile permanently deleted' : 'Profile moved to trash',
+        { profileId: ids[0], profileIds: ids, permanently },
+      );
     }
 
     return result;
+  }
+
+  /**
+   * Permanently delete profiles from Multilogin trash (frees subscription quota).
+   * @param {string|string[]} profileIds
+   */
+  async deleteProfilesPermanently(profileIds) {
+    const result = await this._removeProfiles(profileIds, true);
+    if (result.code === 0) {
+      const ids = this._buildRemoveBody(profileIds, true).profile_ids;
+      return this._successResponse('Profile(s) permanently deleted from trash', {
+        profileIds: ids,
+        deleted: result.data?.removed || ids.length,
+      });
+    }
+    return result;
+  }
+
+  /**
+   * Map raw Multilogin search rows to standardized profile objects.
+   * @private
+   */
+  _mapSearchProfiles(profileList) {
+    return (Array.isArray(profileList) ? profileList : []).map((item) => {
+      const osHint = item.os_type || item.os || null;
+      const params = item.parameters && typeof item.parameters === 'object' ? item.parameters : {};
+      const proxy = params.proxy || item.proxy || null;
+      const nav = params.fingerprint?.navigator || params.navigator || item.fingerprint?.navigator || null;
+      const proxyHost = proxy?.host || proxy?.server || proxy?.hostname || '';
+      const proxyPort = proxy?.port ? parseInt(proxy.port, 10) : undefined;
+      const proxyUsername = proxy?.username || proxy?.user || '';
+      const userAgentHint = nav?.user_agent || nav?.userAgent || item.user_agent || '';
+
+      return {
+        id: item.id || item.profile_id || item.uuid || '',
+        name: item.name || '',
+        status: item.in_use_by ? 'running' : 'stopped',
+        debugPort: null,
+        browserType: 'multilogin',
+        osName: osHint,
+        os: osHint,
+        proxyHost: proxyHost || undefined,
+        proxyPort: Number.isFinite(proxyPort) ? proxyPort : undefined,
+        proxyUsername: proxyUsername || undefined,
+        userAgentHint: userAgentHint || undefined,
+        removedAt: item.removed_at || item.deleted_at || item.updated_at || null,
+      };
+    });
+  }
+
+  /**
+   * Search profiles in folder (active or trash).
+   * @private
+   */
+  async _searchProfiles(pageNo = 1, pageSize = 50, isRemoved = false) {
+    if (!this.folderId) {
+      return this._errorResponse(-5, 'MULTILOGIN_FOLDER_ID environment variable is not set');
+    }
+
+    const limit = Math.max(1, Math.min(100, pageSize));
+    const offset = (pageNo - 1) * limit;
+
+    const body = {
+      folder_id: this.folderId,
+      search_text: '',
+      offset,
+      limit,
+      is_removed: !!isRemoved,
+    };
+
+    return this._authenticatedCloudRequest('/profile/search', { body });
+  }
+
+  /**
+   * List profiles currently in Multilogin trash for this folder.
+   */
+  async listTrashProfiles(pageNo = 1, pageSize = 50) {
+    const result = await this._searchProfiles(pageNo, pageSize, true);
+
+    if (result.code === 0 && result.data) {
+      const profileList = result.data.profiles || [];
+      const profiles = this._mapSearchProfiles(profileList);
+      const total = result.data.total_count || result.data.total || profiles.length;
+      return this._successResponse('Trash profiles retrieved successfully', {
+        profiles,
+        total,
+        pages: Math.ceil(total / Math.max(1, Math.min(100, pageSize))) || 1,
+        current: pageNo,
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Permanently delete all profiles in Multilogin trash (paginated batches).
+   */
+  async emptyTrash() {
+    let totalDeleted = 0;
+    const batchSize = 50;
+    const maxRounds = 200;
+
+    for (let round = 0; round < maxRounds; round++) {
+      const list = await this.listTrashProfiles(1, batchSize);
+      if (list.code !== 0) {
+        if (totalDeleted > 0) {
+          return this._successResponse(`Partial trash cleanup — ${totalDeleted} deleted`, {
+            deleted: totalDeleted,
+            warning: list.message,
+          });
+        }
+        return list;
+      }
+
+      const profiles = list.data?.profiles || [];
+      if (!profiles.length) {
+        break;
+      }
+
+      const ids = profiles.map((p) => p.id).filter(Boolean);
+      const del = await this.deleteProfilesPermanently(ids);
+      if (del.code !== 0) {
+        if (totalDeleted > 0) {
+          return this._successResponse(`Partial trash cleanup — ${totalDeleted} deleted`, {
+            deleted: totalDeleted,
+            warning: del.message,
+          });
+        }
+        return del;
+      }
+
+      totalDeleted += del.data?.deleted || ids.length;
+      if (profiles.length < batchSize) break;
+    }
+
+    return this._successResponse(
+      totalDeleted > 0 ? `Trash emptied — ${totalDeleted} profile(s) removed` : 'Trash is already empty',
+      { deleted: totalDeleted },
+    );
   }
 
   /**
@@ -1032,33 +1823,12 @@ class MultiloginProvider extends BrowserProvider {
 
     // Clamp pageSize to 1-100 range
     const limit = Math.max(1, Math.min(100, pageSize));
-    const offset = (pageNo - 1) * limit;
 
-    const body = {
-      folder_id: this.folderId,
-      search_text: '',
-      offset: offset,
-      limit: limit,
-    };
-
-    const result = await this._authenticatedCloudRequest('/profile/search', { body });
+    const result = await this._searchProfiles(pageNo, limit, false);
 
     if (result.code === 0 && result.data) {
-      // Map Multilogin profiles to standardized format
-      // API returns: { profiles: [...], total_count: N }
       const profileList = result.data.profiles || [];
-      const profiles = (Array.isArray(profileList) ? profileList : []).map((item) => {
-        const osHint = item.os_type || item.os || null;
-        return {
-          id: item.id || item.profile_id || item.uuid || '',
-          name: item.name || '',
-          status: item.in_use_by ? 'running' : 'stopped',
-          debugPort: null,
-          browserType: 'multilogin',
-          osName: osHint,
-          os: osHint,
-        };
-      });
+      const profiles = this._mapSearchProfiles(profileList);
 
       const total = result.data.total_count || result.data.total || profiles.length;
       return this._successResponse('Profiles retrieved successfully', {
@@ -1114,19 +1884,25 @@ class MultiloginProvider extends BrowserProvider {
    * POST https://api.multilogin.com/profile/update
    */
   async updateProfileProxy(profileId, proxy) {
-    if (!proxy || !proxy.server || !proxy.port) {
-      return this._errorResponse(-5, 'Invalid proxy: server and port required');
+    const host = proxy?.server || proxy?.host;
+    const port = proxy?.port;
+    if (!proxy || !host || !port) {
+      return this._errorResponse(-5, 'Invalid proxy: host/server and port required');
     }
+    const rawType = String(proxy.type || proxy.protocol || 'http').toLowerCase();
+    const typeMap = { http: 'http', https: 'https', socks5: 'socks5', socks4: 'socks4' };
+    const apiType = typeMap[rawType] || 'http';
     const body = {
       profile_id: profileId,
       parameters: {
-        flags: { proxy_masking: 'custom' },
+        flags: this._defaultCloudFlags('custom'),
         proxy: {
-          host: proxy.server,
-          port: Number(proxy.port),
+          host,
+          port: Number(port),
           username: proxy.username || '',
           password: proxy.password || '',
-          type: 'http',
+          type: apiType,
+          save_traffic: false,
         },
       },
     };

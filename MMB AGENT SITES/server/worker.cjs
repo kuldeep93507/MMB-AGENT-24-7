@@ -46,7 +46,7 @@ const BROWSER_PROVIDER = process.env.BROWSER_PROVIDER ||
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MORELOGIN API — Start/Stop/Status/Update
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const MORELOGIN_API_KEY = process.env.MORELOGIN_API_KEY || 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e';
+const MORELOGIN_API_KEY = process.env.MORELOGIN_API_KEY || '';
 
 function moreloginRequest(endpoint, body) {
   return new Promise((resolve, reject) => {

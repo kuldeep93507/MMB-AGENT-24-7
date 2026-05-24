@@ -35,12 +35,6 @@ export interface Profile {
    * Optional for backward compat with legacy local-only profiles.
    */
   browserType?: 'morelogin' | 'multilogin';
-
-  /**
-   * True when proxy/fingerprint shown on this row are placeholders — list APIs
-   * don't return assignment details; real values appear after create-full snapshot.
-   */
-  proxyFingerprintPlaceholder?: boolean;
 }
 
 export interface FingerprintConfig {
@@ -95,7 +89,8 @@ export type LogSource =
   | 'backlink'
   | 'manual'
   | 'settings'
-  | 'system';
+  | 'system'
+  | 'yt-agent';
 
 export interface LogEntry {
   id: string;
