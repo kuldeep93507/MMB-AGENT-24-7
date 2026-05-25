@@ -9,7 +9,7 @@ import type { StandardProfile } from '../services/browserProviderApi';
 import ProfileCard from './ProfileCard';
 import NewProfileModal from './NewProfileModal';
 import ProfileSettings from './ProfileSettings';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import { listTrashProfiles, deleteTrashProfiles, emptyTrash } from '../utils/trashApi';
 import {
   fetchSettingsFromServer,
@@ -209,7 +209,7 @@ export default function ProfilesPage({
     }
     setArrangeError(null);
     try {
-      const res = await fetch(backendUrl('/api/manual/batch'), {
+      const res = await backendFetch('/api/manual/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profileIds: runningIds, command: 'arrangeWindows' }),

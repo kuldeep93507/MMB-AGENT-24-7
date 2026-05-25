@@ -314,6 +314,10 @@ class Orchestrator {
    * Stop all workers
    */
   stopAll() {
+    if (this._arrangeTimer) {
+      clearTimeout(this._arrangeTimer);
+      this._arrangeTimer = null;
+    }
     for (const [profileId] of this.workers) {
       this.stopWorker(profileId);
     }

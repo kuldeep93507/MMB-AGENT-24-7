@@ -1,4 +1,4 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import { fetchScheduleProgress, fetchConcurrency } from './scheduleApi';
 
 export type { ScheduleWorkerStats } from './scheduleApi';
@@ -14,7 +14,7 @@ export interface ShuffleStatePayload {
 
 export async function fetchShuffleStateFromServer(): Promise<ShuffleStatePayload | null> {
   try {
-    const res = await fetch(backendUrl('/api/shuffle/state'));
+    const res = await backendFetch('/api/shuffle/state');
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -24,7 +24,7 @@ export async function fetchShuffleStateFromServer(): Promise<ShuffleStatePayload
 
 export async function syncShuffleStateToServer(state: ShuffleStatePayload): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/shuffle/state'), {
+    const res = await backendFetch('/api/shuffle/state', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(state),
@@ -37,7 +37,7 @@ export async function syncShuffleStateToServer(state: ShuffleStatePayload): Prom
 
 export async function clearServerWatchHistory(profileId: string): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/watch-history/' + encodeURIComponent(profileId)), {
+    const res = await backendFetch('/api/watch-history/' + encodeURIComponent(profileId), {
       method: 'DELETE',
     });
     const data = await res.json();
@@ -49,7 +49,7 @@ export async function clearServerWatchHistory(profileId: string): Promise<boolea
 
 export async function stopScheduleRun(scheduleId: string): Promise<void> {
   try {
-    await fetch(backendUrl('/api/schedule/stop'), {
+    await backendFetch('/api/schedule/stop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scheduleId }),

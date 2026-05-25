@@ -10,8 +10,7 @@
  * any existing code, ensuring full backward compatibility.
  * 
  * Configuration (via environment variables):
- *   MORELOGIN_API_KEY — API key for Authorization header
- *     (fallback: 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e' for backward compat)
+ *   MORELOGIN_API_KEY — API key for Authorization header (required — no fallback)
  *   MORELOGIN_PORT — Local API port (default: 40000)
  * 
  * Requirements: 4.1, 4.2, 4.3, 4.5, 4.6, 10.4
@@ -21,16 +20,17 @@
 
 const { BrowserProvider } = require('./BrowserProvider.cjs');
 
-// Default API key for backward compatibility (matches existing hardcoded key in server/index.cjs)
-const DEFAULT_API_KEY = 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e';
 const DEFAULT_PORT = 40000;
 
 class MoreLoginProvider extends BrowserProvider {
   constructor() {
     super('morelogin');
 
-    // Read config from environment with backward-compatible defaults
-    this.apiKey = process.env.MORELOGIN_API_KEY || DEFAULT_API_KEY;
+    const apiKey = String(process.env.MORELOGIN_API_KEY || '').trim();
+    if (!apiKey) {
+      throw new Error('MORELOGIN_API_KEY is required — set it in project root .env or save in Settings');
+    }
+    this.apiKey = apiKey;
     this.port = parseInt(process.env.MORELOGIN_PORT, 10) || DEFAULT_PORT;
     this.baseUrl = `http://127.0.0.1:${this.port}`;
   }

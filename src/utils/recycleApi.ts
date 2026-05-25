@@ -1,4 +1,4 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 
 export interface RecycleSlotStatus {
   slotId: string;
@@ -10,6 +10,7 @@ export interface RecycleSlotStatus {
   lastError: string | null;
   videoCount: number;
   enabled: boolean;
+  isPaused?: boolean;
   profileIdChangedAt?: number | null;
 }
 
@@ -31,7 +32,7 @@ export interface RecycleProfileInput {
 
 export async function fetchRecycleStatus(): Promise<RecycleStatus | null> {
   try {
-    const res = await fetch(backendUrl('/api/recycle/status'));
+    const res = await backendFetch('/api/recycle/status');
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -45,7 +46,7 @@ export async function startRecycleLoop(opts: {
   cooldownMaxMinutes: number;
 }): Promise<{ ok: boolean; error?: string; status?: RecycleStatus }> {
   try {
-    const res = await fetch(backendUrl('/api/recycle/start'), {
+    const res = await backendFetch('/api/recycle/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(opts),
@@ -60,7 +61,7 @@ export async function startRecycleLoop(opts: {
 
 export async function stopRecycleLoop(opts?: { slotId?: string; profileId?: string }): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/recycle/stop'), {
+    const res = await backendFetch('/api/recycle/stop', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(opts || {}),
@@ -69,6 +70,20 @@ export async function stopRecycleLoop(opts?: { slotId?: string; profileId?: stri
   } catch {
     return false;
   }
+}
+
+export async function pauseRecycleLoop(): Promise<boolean> {
+  try {
+    const res = await backendFetch('/api/recycle/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    return res.ok;
+  } catch { return false; }
+}
+
+export async function resumeRecycleLoop(): Promise<boolean> {
+  try {
+    const res = await backendFetch('/api/recycle/resume', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    return res.ok;
+  } catch { return false; }
 }
 
 export function formatCooldownRemaining(until: number | null, now: number): string {

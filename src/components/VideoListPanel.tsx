@@ -28,9 +28,9 @@ export default function VideoListPanel({
   );
 
   const allVideos = useMemo(() => getVideos(channel.id), [channel.id, getVideos]);
-  const totalCount = allVideos.length;
+  const totalCount   = allVideos.length;
   const enabledCount = allVideos.filter(v => v.is_enabled === 1).length;
-  const newCount = allVideos.filter(v => v.is_new === 1).length;
+  const newCount     = allVideos.filter(v => v.is_new === 1).length;
 
   return (
     <div className="bg-gray-950 border border-gray-800 border-t-0 rounded-b-2xl overflow-hidden animate-pulse-once">
@@ -107,7 +107,7 @@ export default function VideoListPanel({
       </div>
 
       {/* Video List */}
-      <div className="max-h-96 overflow-y-auto">
+      <div className="max-h-[520px] overflow-y-auto">
         {videos.length === 0 ? (
           <div className="py-8 text-center">
             <p className="text-gray-500 text-sm">No videos match your filters</p>

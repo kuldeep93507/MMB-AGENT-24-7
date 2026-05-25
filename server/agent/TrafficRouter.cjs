@@ -148,13 +148,34 @@ function generateSearchQuery(videoTitle, channelName) {
     channel ? `${channel} ${shortTitle}` : shortTitle,
   ].filter(q => q.trim().length > 3);
 
-  // Pick random variation
-  return variations[Math.floor(Math.random() * variations.length)];
+  const idx = variations.length > 0 ? Math.floor(Math.random() * variations.length) : 0;
+  const picked = variations[idx];
+  if (picked && picked.trim()) return picked;
+  const cand = `${title} ${channel}`.trim();
+  return cand.length > 2 ? cand : 'youtube video';
 }
 
 async function openVideoBySearch(page, videoTitle, channelName) {
-  const { sleep, randomDelay, forceDarkTheme, humanMouseMove, clickSearchAndType, smoothScroll } = dx();
-  await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  const { sleep, randomDelay, forceDarkTheme, humanMouseMove, clickSearchAndType, smoothScroll, humanType } = dx();
+
+  // Navigate to YouTube via address bar typing (human behavior)
+  const currentUrl = page.url() || '';
+  if (!currentUrl.includes('youtube.com')) {
+    try {
+      await page.keyboard.press('Control+l');
+      await sleep(randomDelay(300, 600));
+      await page.keyboard.press('Control+a');
+      await sleep(randomDelay(50, 120));
+      await page.keyboard.press('Backspace');
+      await sleep(randomDelay(180, 380));
+      await humanType(page, 'youtube.com');
+      await sleep(randomDelay(300, 600));
+      await page.keyboard.press('Enter');
+      await page.waitForLoadState('domcontentloaded', { timeout: 25000 }).catch(() => {});
+    } catch {
+      await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    }
+  }
   await sleep(randomDelay(2000, 4000));
   await forceDarkTheme(page);
   await humanMouseMove(page);

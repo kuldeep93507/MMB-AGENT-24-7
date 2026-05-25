@@ -32,10 +32,19 @@ const {
 const { AIBrain } = require('./AIBrain.cjs');
 const { pickPersona } = require('./personas.cjs');
 
+const { getBackendApiSecret } = require('./apiAuth.cjs');
+
 async function postInternalJson(path, bodyJson) {
   const maxRetries = getAnalyticsTrackMaxRetries();
   let backoff = getAnalyticsTrackInitialBackoffMs();
   const body = JSON.stringify(bodyJson);
+  const secret = getBackendApiSecret();
+  const headers = {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(body),
+  };
+  if (secret) headers['x-api-key'] = secret;
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const ok = await new Promise((resolve) => {
       try {
@@ -46,19 +55,23 @@ async function postInternalJson(path, bodyJson) {
             port: api.port || (api.protocol === 'https:' ? 443 : 80),
             path: api.pathname + api.search,
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+            headers,
             timeout: 8000,
           },
           () => resolve(true),
         );
-        req.on('error', () => resolve(false));
+        req.on('error', (e) => {
+          console.error('[postInternalJson] request error:', e && e.message ? e.message : String(e));
+          resolve(false);
+        });
         req.on('timeout', () => {
           req.destroy();
           resolve(false);
         });
         req.write(body);
         req.end();
-      } catch {
+      } catch (err) {
+        console.error('[postInternalJson] caught:', err && err.message ? err.message : String(err));
         resolve(false);
       }
     });
@@ -85,6 +98,7 @@ const {
   humanType,
   humanMouseMove,
   smoothScroll,
+  typeUrlInAddressBar,
 } = require('./agent/HumanBehavior.cjs');
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -134,6 +148,7 @@ const {
   ensureAutoplayOff,
   dismissYouTubePopups,
   expandDescriptionAndRead,
+  clickBellIcon,
   hoverRelatedVideos,
   verifyVideoQuality,
   ensureVideoQuality,
@@ -160,12 +175,20 @@ async function performEngagement(page, config) {
   if (!config) return;
   await sleep(randomDelay(5000, 15000)); // Wait before engaging
 
+  // Detect mobile/Android for this page
+  const isMobile = await isMobileYouTube(page).catch(() => false);
+
   // Like — setting ON = always attempt
   if (config.likeEnabled) {
     try {
-      const likeBtn = await page.$('like-button-view-model button, ytd-toggle-button-renderer#top-level-buttons-computed button:first-child, button[aria-label*="like"]');
+      const likeSel = isMobile
+        ? 'ytm-like-button-renderer button[aria-label*="like" i]:not([aria-label*="dislike" i]), button[aria-label*="like" i]:not([aria-label*="dislike" i])'
+        : 'like-button-view-model button, ytd-toggle-button-renderer#top-level-buttons-computed button:first-child, button[aria-label*="like" i]:not([aria-label*="dislike" i])';
+      const likeBtn = await page.$(likeSel);
       if (likeBtn) {
-        const isLiked = await likeBtn.evaluate(el => el.getAttribute('aria-pressed') === 'true');
+        const isLiked = await likeBtn.evaluate(el =>
+          el.getAttribute('aria-pressed') === 'true' || (el.getAttribute('aria-label') || '').toLowerCase().includes('unlike'),
+        ).catch(() => false);
         if (!isLiked) {
           await humanMouseMove(page);
           await sleep(randomDelay(500, 1500));
@@ -179,14 +202,24 @@ async function performEngagement(page, config) {
   // Subscribe — setting ON = always attempt
   if (config.subscribeEnabled) {
     try {
-      const subBtn = await page.$('#subscribe-button button, ytd-subscribe-button-renderer button');
+      const subSel = isMobile
+        ? 'ytm-subscribe-button-renderer button, .yt-spec-button-shape-next[aria-label*="Subscribe" i], button[aria-label*="Subscribe" i]:not([aria-label*="Unsubscribe" i])'
+        : '#subscribe-button button, ytd-subscribe-button-renderer button';
+      const subBtn = await page.$(subSel);
       if (subBtn) {
         const text = await subBtn.textContent().catch(() => '');
-        if (text && !text.toLowerCase().includes('subscribed')) {
+        const label = await subBtn.getAttribute('aria-label').catch(() => '');
+        const alreadySub = (text && text.toLowerCase().includes('subscribed'))
+          || (label && label.toLowerCase().includes('unsubscribe'));
+        if (!alreadySub) {
           await humanMouseMove(page);
           await sleep(randomDelay(1000, 3000));
           await subBtn.click();
           await sleep(randomDelay(1000, 2000));
+          // Bell icon after subscribe
+          if (config.bellEnabled !== false) {
+            await clickBellIcon(page, () => {}).catch(() => {});
+          }
         }
       }
     } catch {}
@@ -197,17 +230,35 @@ async function performEngagement(page, config) {
     try {
       await smoothScroll(page, randomDelay(400, 800), 'down');
       await sleep(randomDelay(2000, 4000));
-      const commentBox = await page.$('#simplebox-placeholder, #placeholder-area');
-      if (commentBox) {
-        await commentBox.click();
-        await sleep(randomDelay(1000, 2000));
-        await humanType(page, config.commentText);
-        await sleep(randomDelay(1000, 2000));
-        // Submit comment
-        const submitBtn = await page.$('#submit-button button, tp-yt-paper-button#submit-button');
-        if (submitBtn) await submitBtn.click();
-        await trackEngagement(this.profileId, 'comment').catch(() => {});
-        await sleep(randomDelay(2000, 3000));
+      if (isMobile) {
+        const mobileBox = await page.$(
+          'ytm-comment-simplebox-renderer, .comment-simplebox-content, [aria-label*="comment" i][role="textbox"]',
+        );
+        if (mobileBox) {
+          await mobileBox.click();
+          await sleep(randomDelay(1000, 2000));
+          const mobileInput = await page.$(
+            'ytm-comment-simplebox-renderer [contenteditable="true"], [id*="comment-input"], textarea[aria-label*="comment" i]',
+          ).catch(() => null) || mobileBox;
+          await mobileInput.type(config.commentText, { delay: randomDelay(40, 80) });
+          await sleep(randomDelay(1000, 2000));
+          const mobileSubmit = await page.$(
+            'ytm-comment-simplebox-renderer button[aria-label*="Comment" i], ytm-comment-simplebox-renderer button:last-child',
+          );
+          if (mobileSubmit) await mobileSubmit.click();
+          await sleep(randomDelay(2000, 3000));
+        }
+      } else {
+        const commentBox = await page.$('#simplebox-placeholder, #placeholder-area');
+        if (commentBox) {
+          await commentBox.click();
+          await sleep(randomDelay(1000, 2000));
+          await humanType(page, config.commentText);
+          await sleep(randomDelay(1000, 2000));
+          const submitBtn = await page.$('#submit-button button, tp-yt-paper-button#submit-button');
+          if (submitBtn) await submitBtn.click();
+          await sleep(randomDelay(2000, 3000));
+        }
       }
     } catch {}
   }
@@ -223,9 +274,11 @@ VideoWatcher.setBehaviorHelpers({
   smoothScroll,
   humanMouseMove,
   expandDescriptionAndRead,
+  clickBellIcon,
   hoverRelatedVideos,
   humanType,
   seekForwardKeyboard,
+  isMobileYouTube,
   trackEngagement,
 });
 
@@ -275,6 +328,39 @@ class ProfileAgent {
     this._sessionTrafficSource = null;
     /** Rare direct URL uses this session (max 1). */
     this._trafficSession = { directUrlUses: 0 };
+
+    /** OS label from scheduler / manual control — used for keybindings (e.g. ⌘W). */
+    this.profileOs =
+      typeof options.profileOs === 'string' && options.profileOs.trim()
+        ? options.profileOs.trim()
+        : '';
+
+    /** prevent duplicate crash/close listeners on the same tab */
+    this._lastPageLifecycle = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+  }
+
+  /**
+   * Keep `_lastPage` consistent when the Playwright tab closes/crashes (avoids dead handle reuse).
+   */
+  _attachLastPage(page) {
+    try {
+      if (!page) return;
+      if (typeof page.isClosed === 'function' && page.isClosed()) return;
+      this._lastPage = page;
+      if (!this._lastPageLifecycle) return;
+      if (this._lastPageLifecycle.has(page)) return;
+      this._lastPageLifecycle.add(page);
+      const detach = () => {
+        try {
+          if (this._lastPage === page) this._lastPage = null;
+        } catch { /* ignore */ }
+      };
+
+      page.once('close', detach);
+      page.on('crash', detach);
+    } catch (e) {
+      console.error('[ProfileAgent] _attachLastPage failed:', e && e.message ? e.message : String(e));
+    }
   }
 
   /** Lock traffic source for entire session + pass session state to search engine. */
@@ -335,9 +421,17 @@ class ProfileAgent {
     return false;
   }
 
-  async _prepareAiSessionConfig(videoTitle, channelName, config) {
+  // FIX Bug 5: accepts retryDepth — clears cached query on retry so a NEW variation is used
+  async _prepareAiSessionConfig(videoTitle, channelName, config, retryDepth = 0) {
     const effective = { ...config };
     const videoKey = config.videoId || videoTitle;
+
+    // FIX: On retry, delete the cached query so a fresh (different) variation is generated
+    // This prevents the "keyword loop" where every retry uses the same bad search query
+    if (retryDepth > 0) {
+      this._searchQueryByVideo.delete(videoKey);
+      this.log('info', `[Search] Retry #${retryDepth} — generating fresh search query variation`);
+    }
 
     if (this._searchQueryByVideo.has(videoKey)) {
       return { effective, searchTitle: this._searchQueryByVideo.get(videoKey) };
@@ -347,7 +441,8 @@ class ProfileAgent {
     let searchTitle;
 
     if (!this.ai?.isEnabled()) {
-      searchTitle = deriveSearchQuery(videoTitle, channelName, this._videoIndex, this.profileId);
+      // FIX: Use videoIndex + retryDepth as offset so each retry gets a different seed → different words picked
+      searchTitle = deriveSearchQuery(videoTitle, channelName, this._videoIndex + retryDepth, this.profileId);
     } else {
       const src = await this.ai.decideTrafficSource(videoTitle, this._lastTrafficSource || '');
       if (src === 'search') effective.trafficPreference = 'search';
@@ -356,9 +451,9 @@ class ProfileAgent {
       else if (src === 'homepage') effective.trafficPreference = 'channelPage';
 
       const aiQuery = await this.ai.decideYouTubeSearchQuery(videoTitle, channelName, avoid);
-      searchTitle = aiQuery || deriveSearchQuery(videoTitle, channelName, this._videoIndex, this.profileId);
+      searchTitle = aiQuery || deriveSearchQuery(videoTitle, channelName, this._videoIndex + retryDepth, this.profileId);
       if (this._sessionSearchQueries.has(searchTitle.toLowerCase())) {
-        searchTitle = deriveSearchQuery(videoTitle, channelName, this._videoIndex + 1, this.profileId);
+        searchTitle = deriveSearchQuery(videoTitle, channelName, this._videoIndex + retryDepth + 1, this.profileId);
       }
       this._videoBehavior = await this.ai.decideVideoBehavior(
         videoTitle,
@@ -491,27 +586,112 @@ class ProfileAgent {
   }
 
   // WARMUP — Browse homepage + maybe watch 1-2 shorts (like real user)
-  async warmup() {
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // WARMUP: High-CPM site pool for pre-YouTube browsing
+  // Each profile gets 1-2 different sites based on profile ID seeding.
+  // Categories: Finance / Tech / News / Shopping / Health — high ad-value signals.
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  static _HIGH_CPM_POOL = [
+    // Finance (highest CPM — $15-50 CPM range)
+    { url: 'https://www.bankrate.com/', label: 'Bankrate', timeMs: [8000, 18000] },
+    { url: 'https://www.nerdwallet.com/', label: 'NerdWallet', timeMs: [7000, 16000] },
+    { url: 'https://www.investopedia.com/', label: 'Investopedia', timeMs: [8000, 20000] },
+    { url: 'https://www.creditkarma.com/', label: 'CreditKarma', timeMs: [7000, 15000] },
+    // Tech / Gadgets ($8-20 CPM)
+    { url: 'https://www.techcrunch.com/', label: 'TechCrunch', timeMs: [6000, 14000] },
+    { url: 'https://www.theverge.com/', label: 'The Verge', timeMs: [6000, 13000] },
+    { url: 'https://www.cnet.com/', label: 'CNET', timeMs: [7000, 15000] },
+    { url: 'https://www.wired.com/', label: 'Wired', timeMs: [6000, 13000] },
+    // Business / News ($10-25 CPM)
+    { url: 'https://www.forbes.com/', label: 'Forbes', timeMs: [7000, 16000] },
+    { url: 'https://www.businessinsider.com/', label: 'BusinessInsider', timeMs: [6000, 14000] },
+    { url: 'https://www.reuters.com/', label: 'Reuters', timeMs: [5000, 12000] },
+    { url: 'https://www.bbc.com/news', label: 'BBC News', timeMs: [5000, 12000] },
+    // Shopping ($5-15 CPM — signals buying intent)
+    { url: 'https://www.amazon.com/deals', label: 'Amazon Deals', timeMs: [7000, 18000] },
+    { url: 'https://www.bestbuy.com/', label: 'BestBuy', timeMs: [6000, 14000] },
+    // Health ($10-30 CPM — insurance/pharma ad buyers)
+    { url: 'https://www.webmd.com/', label: 'WebMD', timeMs: [6000, 15000] },
+    { url: 'https://www.healthline.com/', label: 'Healthline', timeMs: [6000, 14000] },
+  ];
+
+  /**
+   * Pick 1-2 high-CPM sites for this profile (deterministic per profile ID).
+   * Different profiles always get different sites.
+   * @returns {{ url: string, label: string, timeMs: number[] }[]}
+   */
+  _pickWarmupSites() {
+    const pool = ProfileAgent._HIGH_CPM_POOL;
+    // Use last 8 hex chars of profileId as seed integer (deterministic per profile)
+    const tail = parseInt((this.profileId || '').slice(-8) || '0', 16) || 0;
+    const idx1 = tail % pool.length;
+    const idx2 = (tail + 5) % pool.length; // offset by 5 to ensure different site
+    const count = (tail % 3 === 0) ? 2 : 1; // ~33% of profiles visit 2 sites, rest visit 1
+    if (count === 2 && idx1 !== idx2) {
+      return [pool[idx1], pool[idx2]];
+    }
+    return [pool[idx1]];
+  }
+
+  async warmup(runConfig = {}) {
     if (!this.context) return;
-    this.log('info', 'Warmup: Browsing YouTube homepage...');
+
+    // ── Warmup toggle: respect user's per-session setting ──
+    // warmupEnabled defaults to true; set false in VideoShufflePage to skip entirely
+    if (runConfig.warmupEnabled === false) {
+      this.log('info', 'Warmup: skipped (disabled in settings)');
+      return;
+    }
+
+    this.log('info', 'Warmup: Starting pre-YouTube browsing...');
     this.status = 'warmup';
 
     try {
       const page = this.context.pages()[0] || await this.context.newPage();
-      this._lastPage = page;
+      this._attachLastPage(page);
 
       // Detect Android/mobile profile via User-Agent BEFORE navigating anywhere
-      // This is the only reliable way — antidetect browsers may not auto-redirect
-      // www.youtube.com to m.youtube.com even with an Android UA
       const isAndroid = await isAndroidUA(page);
       if (isAndroid) {
         this.log('info', 'Warmup: Android profile detected — using mobile YouTube (m.youtube.com)');
         this._isAndroidProfile = true;
       }
 
-      // Go to correct YouTube homepage (mobile or desktop)
+      // ── Phase 1: High-CPM site browsing (desktop only — mobile profile goes direct to YT) ──
+      // Each profile visits 1-2 unique high-CPM sites to seed ad-interest signals.
+      if (!isAndroid) {
+        const sites = this._pickWarmupSites();
+        for (const site of sites) {
+          try {
+            this.log('info', `Warmup: Browsing ${site.label} (high-CPM signal)...`);
+            const navOk = await typeUrlInAddressBar(page, site.url, this.typingSpeed);
+            if (!navOk) {
+              await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
+            }
+            await page.waitForLoadState('domcontentloaded', { timeout: 18000 }).catch(() => {});
+
+            // Read page like a human: mouse move + scroll + wait
+            await humanMouseMove(page);
+            const readTime = randomDelay(site.timeMs[0], site.timeMs[1]);
+            await sleep(Math.floor(readTime * 0.4));
+            await smoothScroll(page, randomDelay(150, 400), 'down', this._personality);
+            await sleep(Math.floor(readTime * 0.35));
+            await smoothScroll(page, randomDelay(80, 250), 'down', this._personality);
+            await sleep(Math.floor(readTime * 0.25));
+          } catch (siteErr) {
+            this.log('warn', `Warmup: ${site.label} skipped — ${siteErr.message.split('\n')[0]}`);
+          }
+        }
+      }
+
+      // ── Phase 2: Navigate to YouTube homepage ──
       const ytHome = isAndroid ? 'https://m.youtube.com' : 'https://www.youtube.com';
-      await page.goto(ytHome, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      this.log('info', 'Warmup: Navigating to YouTube...');
+      const warmupNavOk = await typeUrlInAddressBar(page, ytHome, this.typingSpeed);
+      if (!warmupNavOk) {
+        await page.goto(ytHome, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
+      }
+      await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
       await sleep(randomDelay(2000, 4000));
 
       // Dark theme only works on desktop YouTube
@@ -527,27 +707,49 @@ class ProfileAgent {
       await smoothScroll(page, randomDelay(200, 400), 'up');
       await sleep(randomDelay(1000, 3000));
 
-      // 40% chance: Watch 1-3 Shorts — desktop only, wrapped in its own try/catch
-      // so a Shorts timeout does NOT break the page for the main video search
-      if (!isAndroid && this._personality.chance(0.4)) {
+      // 40% chance: Watch 1-3 Shorts — desktop AND mobile (Android uses m.youtube.com/shorts)
+      if (this._personality.chance(0.4)) {
         try {
           this.log('info', 'Warmup: Watching a few Shorts...');
-          await page.goto('https://www.youtube.com/shorts', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          const shortsUrl = isAndroid ? 'https://m.youtube.com/shorts' : 'https://www.youtube.com/shorts';
+          const homeUrl  = isAndroid ? 'https://m.youtube.com' : 'https://www.youtube.com';
+          const shortsNavOk = await typeUrlInAddressBar(page, shortsUrl, this.typingSpeed);
+          if (!shortsNavOk) await page.goto(shortsUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
           await sleep(randomDelay(2000, 4000));
           const shortsCount = randomDelay(1, 3);
           for (let i = 0; i < shortsCount; i++) {
             await sleep(randomDelay(5000, 15000)); // Watch short
-            await page.keyboard.press('ArrowDown'); // Next short
+            if (isAndroid) {
+              // Mobile: swipe up via touch event to go to next short
+              await page.evaluate(() => {
+                const el = document.querySelector('ytm-shorts-player-renderer, ytm-shorts-video-renderer, video') || document.body;
+                const rect = el.getBoundingClientRect();
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+                el.dispatchEvent(new TouchEvent('touchstart', { touches: [new Touch({ identifier: 1, target: el, clientX: cx, clientY: cy })], bubbles: true }));
+                el.dispatchEvent(new TouchEvent('touchend', { touches: [], changedTouches: [new Touch({ identifier: 1, target: el, clientX: cx, clientY: cy - 200 })], bubbles: true }));
+              }).catch(() => {});
+              // Fallback: ArrowDown also works in Chromium even with Android UA
+              await page.keyboard.press('ArrowDown').catch(() => {});
+            } else {
+              await page.keyboard.press('ArrowDown'); // Desktop: next short
+            }
             await sleep(randomDelay(500, 1500));
           }
           // Go back to homepage
-          await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
+          const backNavOk = await typeUrlInAddressBar(page, homeUrl, this.typingSpeed);
+          if (!backNavOk) await page.goto(homeUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+          await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
           await sleep(randomDelay(2000, 4000));
         } catch (shortsErr) {
-          // Shorts failed — recover by going back to main YouTube page
+          // Shorts failed — recover by going back to YouTube homepage
           this.log('warn', `Warmup Shorts skipped: ${shortsErr.message.split('\n')[0]}`);
           try {
-            await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
+            const homeUrl = isAndroid ? 'https://m.youtube.com' : 'https://www.youtube.com';
+            const recoverNavOk = await typeUrlInAddressBar(page, homeUrl, this.typingSpeed);
+            if (!recoverNavOk) await page.goto(homeUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+            await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
             await sleep(1000);
           } catch {
             // Page is unrecoverable — clear _lastPage so searchAndWatch opens a fresh page
@@ -574,8 +776,9 @@ class ProfileAgent {
     }
 
     // WARMUP: First video of session — browse homepage + maybe shorts
+    // NOTE: use `config` here (the function parameter) — `runConfig` is not yet defined at this point
     if (!this._warmedUp) {
-      await this.warmup();
+      await this.warmup(config);
       this._warmedUp = true;
     }
 
@@ -591,7 +794,8 @@ class ProfileAgent {
 
     this.currentVideo = videoTitle;
     this.status = 'searching';
-    const { effective: effectiveConfig, searchTitle } = await this._prepareAiSessionConfig(videoTitle, channelName, config);
+    // FIX Bug 5: pass _retryDepth so retry generates a different search query
+    const { effective: effectiveConfig, searchTitle } = await this._prepareAiSessionConfig(videoTitle, channelName, config, _retryDepth);
     const runConfig = { ...config, ...effectiveConfig };
     const trafficType = runConfig.trafficPreference || 'search';
     this.log('info', `[${trafficType}] Query: "${searchTitle}" | Persona: ${this.persona.name} | AI: ${this.ai.isEnabled() ? 'on' : 'off'}`);
@@ -609,20 +813,20 @@ class ProfileAgent {
         } catch {
           // Page is dead — create new one
           page = await this.context.newPage();
-          this._lastPage = page;
+          this._attachLastPage(page);
         }
       } else if (!this._lastPage) {
         // Warmup cleared _lastPage — always open fresh page (avoid reusing broken pages)
         page = await this.context.newPage();
-        this._lastPage = page;
+        this._attachLastPage(page);
       } else {
         page = existingPages.length > 0 ? existingPages[existingPages.length - 1] : await this.context.newPage();
-        this._lastPage = page;
+        this._attachLastPage(page);
       }
     } catch {
       // Context might be broken — try new page
       page = await this.context.newPage();
-      this._lastPage = page;
+      this._attachLastPage(page);
     }
 
     try {
@@ -647,9 +851,11 @@ class ProfileAgent {
         await forceDarkTheme(page);
         const currentUrl = page.url();
         if (!currentUrl.includes('youtube.com') && !currentUrl.includes('google.com') && !currentUrl.includes('bing.com')) {
-          // Fresh page — peek at what YouTube serves us
-          await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-          await sleep(1000);
+          // Fresh page — navigate to YouTube via address bar typing (human behavior)
+          const desktopNavOk = await typeUrlInAddressBar(page, 'https://www.youtube.com', this.typingSpeed);
+          if (!desktopNavOk) await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+          await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+          await sleep(randomDelay(800, 1500));
         }
       }
 
@@ -826,19 +1032,22 @@ class ProfileAgent {
         return false;
       }
 
-      // Success — no reset needed (depth resets automatically on fresh call)
+      // Install ad skipper early (runs as background interval)
       await VideoWatcher.ensureYouTubeAdSkipper(page, runConfig);
       await sleep(randomDelay(3000, 6000));
       await dismissYouTubePopups(page, (l, m) => this.log(l, m));
       await forceDarkTheme(page);
-      await ensureAutoplayOff(page, (l, m) => this.log(l, m));
-      await ensureVideoQuality(page, this._videoBehavior?.quality || runConfig.videoQuality, (l, m) => this.log(l, m));
       await overridePageVisibility(page);
 
       this.status = 'watching';
       this.log('success', `Now watching: "${videoTitle}"`);
 
+      // getVideoDuration handles pre-roll ads first (waitForAdsToClear inside)
+      // Autoplay + quality are set AFTER ads finish — they apply to the actual video
       const duration = await this.getVideoDuration(page, runConfig);
+      await ensureAutoplayOff(page, (l, m) => this.log(l, m));
+      await ensureVideoQuality(page, this._videoBehavior?.quality || runConfig.videoQuality, (l, m) => this.log(l, m));
+
       let { watchTime, watchPercent } = await this.resolveWatchTimeMs(duration, runConfig);
       watchTime = await this._adjustWatchForPosition(page, duration, watchTime, watchPercent);
       this.log(
@@ -898,7 +1107,7 @@ class ProfileAgent {
 
     // WARMUP: First video of session
     if (!this._warmedUp) {
-      await this.warmup();
+      await this.warmup(config);
       this._warmedUp = true;
     }
 
@@ -924,11 +1133,11 @@ class ProfileAgent {
         }
         if (!page) {
           page = existingPages.length > 0 ? existingPages[existingPages.length - 1] : await this.context.newPage();
-          this._lastPage = page;
+          this._attachLastPage(page);
         }
       } catch {
         page = await this.context.newPage();
-        this._lastPage = page;
+        this._attachLastPage(page);
       }
 
       await page.goto(videoUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -950,11 +1159,14 @@ class ProfileAgent {
 
       await forceDarkTheme(page);
       await dismissYouTubePopups(page, (l, m) => this.log(l, m));
-      await ensureAutoplayOff(page, (l, m) => this.log(l, m));
-      await ensureVideoQuality(page, config.videoQuality, (l, m) => this.log(l, m));
       await overridePageVisibility(page);
 
+      // getVideoDuration handles pre-roll ads first
+      // Autoplay + quality set AFTER ads — they apply to actual video, not ad
       const duration = await this.getVideoDuration(page, config);
+      await ensureAutoplayOff(page, (l, m) => this.log(l, m));
+      await ensureVideoQuality(page, config.videoQuality, (l, m) => this.log(l, m));
+
       let { watchTime, watchPercent } = await this.resolveWatchTimeMs(duration, config);
       watchTime = await this._adjustWatchForPosition(page, duration, watchTime, watchPercent);
       if (config.qaTestMode) {
@@ -990,8 +1202,10 @@ class ProfileAgent {
       const state = await VideoWatcher.getVideoPlaybackState(page);
       if (!state.ok || !state.duration || state.duration < 10) return watchTimeMs;
       const watchedPct = (state.currentTime / state.duration) * 100;
-      if (watchedPct >= watchPercent - 5) {
-        this.log('info', `Video already at ${Math.round(watchedPct)}% (target ${watchPercent}%) — no extra watch needed`);
+      // Only trust position if video has played for > 10s
+      // (avoids false "already watched" from buffering or ad-phase currentTime)
+      if (state.currentTime > 10 && watchedPct >= watchPercent - 5) {
+        this.log('info', `Video already at ${Math.round(watchedPct)}% @ ${Math.round(state.currentTime)}s (target ${watchPercent}%) — no extra watch needed`);
         return 0;
       }
       const remainingPct = Math.max(0, watchPercent - watchedPct);
@@ -1005,7 +1219,22 @@ class ProfileAgent {
   }
 
   async disconnect() {
-    if (this.browser) { await this.browser.close().catch(() => {}); this.browser = null; this.context = null; }
+    try {
+      if (this.context) {
+        const pages = this.context.pages().filter((p) => p && (typeof p.isClosed !== 'function' || !p.isClosed()));
+        for (const p of pages) {
+          await VideoWatcher.clearYouTubePageAdIntervals(p);
+        }
+      }
+    } catch (e) {
+      console.error('[ProfileAgent] disconnect cleanup:', e && e.message ? e.message : String(e));
+    }
+    if (this.browser) {
+      await this.browser.close().catch(() => {});
+      this.browser = null;
+      this.context = null;
+    }
+    this._lastPage = null;
     this.status = 'done';
     this.log('info', 'Agent disconnected');
   }

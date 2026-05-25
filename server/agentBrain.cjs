@@ -106,6 +106,15 @@ function buildAgentConfig(profileConfig = {}, scheduleDefaults = {}) {
     seekForwardSec: pc.seekForwardSec ?? 10,
     qaMinWatchSec: pc.qaMinWatchSec ?? 90,
     qaMaxWatchSec: pc.qaMaxWatchSec ?? 600,
+    /** Wall-clock ceiling for aggregated ad bursts (many mid-rolls); default 300s */
+    maxAdsTimeoutSec: pc.maxAdsTimeoutSec != null && Number.isFinite(Number(pc.maxAdsTimeoutSec))
+      ? Number(pc.maxAdsTimeoutSec)
+      : 300,
+    /** OS hint for shortcuts (passed to worker/agent) */
+
+    profileOs: typeof pc.profileOs === 'string' && pc.profileOs.trim()
+      ? pc.profileOs.trim()
+      : (typeof pc.osName === 'string' && pc.osName.trim() ? pc.osName.trim() : ''),
   };
 }
 
@@ -272,40 +281,56 @@ async function detectPageBlock(page) {
 
 /**
  * Read what is actually playing on the watch page.
+ * FIX Bug 8: Polls up to 4s for the title to load — YouTube SPA loads title asynchronously
+ * Without this, verifyOpenedVideo reads empty/old title → false mismatch → unnecessary retries
  */
 async function readPlaybackContext(page) {
+  const TITLE_WAIT_MS = 4000;
+  const POLL_INTERVAL = 350;
+  const start = Date.now();
+
+  const readOnce = () => page.evaluate(() => {
+    const url = location.href || '';
+    const idMatch = url.match(/(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+    const videoId = idMatch ? idMatch[1] : '';
+
+    const titleEl =
+      document.querySelector('h1.ytd-watch-metadata yt-formatted-string') ||
+      document.querySelector('h1 yt-formatted-string') ||
+      document.querySelector('#title h1') ||
+      document.querySelector('meta[property="og:title"]');
+    const title = titleEl?.textContent?.trim()
+      || titleEl?.getAttribute?.('content')?.trim()
+      || document.title.replace(' - YouTube', '').trim();
+
+    const channelEl =
+      document.querySelector('ytd-channel-name a') ||
+      document.querySelector('#owner #channel-name a') ||
+      document.querySelector('yt-formatted-string.ytd-channel-name') ||
+      document.querySelector('span.ytd-video-owner-renderer a') ||
+      document.querySelector('.slim-owner-icon-and-title a') ||
+      document.querySelector('ytm-slim-owner-renderer a') ||
+      document.querySelector('.ytm-slim-owner-renderer a') ||
+      document.querySelector('[class*="slim-owner"] a') ||
+      document.querySelector('ytm-channel-name-renderer a');
+    const channel = channelEl?.textContent?.trim() || '';
+
+    const onWatch = url.includes('/watch') || url.includes('/shorts/');
+    return { url, videoId, title, channel, onWatch };
+  }).catch(() => null);
+
   try {
-    return await page.evaluate(() => {
-      const url = location.href || '';
-      const idMatch = url.match(/(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-      const videoId = idMatch ? idMatch[1] : '';
-
-      const titleEl =
-        document.querySelector('h1.ytd-watch-metadata yt-formatted-string') ||
-        document.querySelector('h1 yt-formatted-string') ||
-        document.querySelector('#title h1') ||
-        document.querySelector('meta[property="og:title"]');
-      const title = titleEl?.textContent?.trim()
-        || titleEl?.getAttribute?.('content')?.trim()
-        || document.title.replace(' - YouTube', '').trim();
-
-      const channelEl =
-        // Desktop selectors
-        document.querySelector('ytd-channel-name a') ||
-        document.querySelector('#owner #channel-name a') ||
-        document.querySelector('yt-formatted-string.ytd-channel-name') ||
-        document.querySelector('span.ytd-video-owner-renderer a') ||
-        // Mobile YouTube (m.youtube.com) selectors
-        document.querySelector('.slim-owner-icon-and-title a') ||
-        document.querySelector('ytm-slim-owner-renderer a') ||
-        document.querySelector('.ytm-slim-owner-renderer a') ||
-        document.querySelector('[class*="slim-owner"] a') ||
-        document.querySelector('ytm-channel-name-renderer a');
-      const channel = channelEl?.textContent?.trim() || '';
-
-      const onWatch = url.includes('/watch') || url.includes('/shorts/');
-      return { url, videoId, title, channel, onWatch };
-    });
+    let ctx = null;
+    while (Date.now() - start < TITLE_WAIT_MS) {
+      ctx = await readOnce();
+      if (!ctx) break;
+      // Title loaded and meaningful — done
+      if (ctx.title && ctx.title.length > 3 && ctx.title.toLowerCase() !== 'youtube') break;
+      // On watch page with video ID in URL — good enough even if title not loaded yet
+      if (ctx.videoId && ctx.onWatch) break;
+      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+    }
+    return ctx || { url: '', videoId: '', title: '', channel: '', onWatch: false };
   } catch {
     return { url: '', videoId: '', title: '', channel: '', onWatch: false };
   }
@@ -435,12 +460,19 @@ function deriveSearchQuery(videoTitle, channelName = '', videoIndex = 0, profile
     return out;
   };
   const kw = pick(words, Math.min(4, Math.max(3, words.length)));
-  const suffixes = ['', 'explained', 'review', '2026', 'guide'];
-  const suffix = suffixes[Math.floor(rng() * suffixes.length)];
+  // FIX Bug 6: Removed random suffixes ("explained", "review", "guide", "2026")
+  // These caused searches to miss the target video entirely.
+  // Only optionally append channel name word (natural human behavior, 30% chance).
   const parts = [...kw];
-  if (suffix && !parts.includes(suffix)) parts.push(suffix);
-  if (channelName && rng() > 0.55) parts.push(normalizeText(channelName).split(' ')[0]);
-  return parts.filter(Boolean).join(' ').slice(0, 70) || videoTitle.slice(0, 60);
+  if (channelName && rng() > 0.70) parts.push(normalizeText(channelName).split(' ')[0]);
+  const q = parts.filter(Boolean).join(' ').slice(0, 70);
+  if (q.trim().length >= 3) return q;
+  const rawTitle = normalizeText(videoTitle || '').trim();
+  if (rawTitle.length) return rawTitle.slice(0, 70);
+
+  const ch = normalizeText(channelName || '').trim();
+  if (ch.length) return ch.slice(0, 70);
+  return 'youtube video';
 }
 
 module.exports = {

@@ -67,8 +67,11 @@ function verifyVideoMatch(
   }
 
   const isMatch = needChannel
+    // Channel provided: must match channel + 45% title + score 62
     ? (channelOk && titleMatchPercent >= 0.45 && score >= 62)
-    : (titleMatchPercent >= 0.5 && score >= 42);
+    // No channel given: require very high title match (80%) to avoid wrong-video clicks
+    // Best practice: always provide channelName in schedule for 100% accuracy
+    : (titleMatchPercent >= 0.80 && score >= 55);
 
   return { score, titleMatchPercent, isMatch };
 }

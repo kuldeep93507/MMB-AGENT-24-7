@@ -83,13 +83,14 @@ function initAutoIncrement() {
 }
 let autoIncrement = initAutoIncrement();
 
-/** Parse "12:34" or "1:23:45" → seconds */
+/** Parse "12:34" or "1:23:45" → seconds. Returns -1 for unknown/missing. */
 function parseDurationToSeconds(dur: string): number {
-  if (!dur || dur === '0:00') return 0;
-  const parts = dur.split(':').map(Number);
+  if (!dur) return -1;
+  const parts = dur.trim().split(':').map(Number);
+  if (parts.some(isNaN)) return -1;
   if (parts.length === 2) return parts[0] * 60 + parts[1];
   if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  return 0;
+  return -1;
 }
 
 function youtubeVideoToVideo(ytVideo: YouTubeVideo, channelDbId: number): Video {
@@ -215,7 +216,7 @@ export function useChannelStore() {
         channel_name: data.channelName,
         channel_handle: `@${data.channelName.replace(/\s+/g, '').toLowerCase()}`,
         channel_url: data.channelUrl,
-        subscriber_count: 0,
+        subscriber_count: data.subscriberCount ?? 0,
         status,
         auto_sync: autoSync,
         last_sync: Date.now(),
@@ -309,12 +310,20 @@ export function useChannelStore() {
       const existingVideoIds = videos.filter(v => v.channel_id === id).map(v => v.video_id);
       const newYtVideos = data.videos.filter(v => !existingVideoIds.includes(v.videoId));
 
-      // Update existing video stats (views, likes)
+      // Update existing video stats (views, likes, duration)
       setVideos(prev => prev.map(v => {
         if (v.channel_id !== id) return v;
         const ytVideo = data.videos.find(yv => yv.videoId === v.video_id);
         if (ytVideo) {
-          return { ...v, views: ytVideo.views, likes: ytVideo.likes };
+          const newDuration = parseDurationToSeconds(ytVideo.duration || '');
+          return {
+            ...v,
+            views: ytVideo.views,
+            likes: ytVideo.likes,
+            thumbnail: ytVideo.thumbnail || v.thumbnail,
+            // Only update duration if we got a valid one (> 0)
+            duration: newDuration > 0 ? newDuration : v.duration,
+          };
         }
         return v;
       }));
@@ -331,6 +340,7 @@ export function useChannelStore() {
         last_sync: Date.now(),
         channel_name: data.channelName,
         total_videos: data.videos.length,
+        subscriber_count: data.subscriberCount > 0 ? data.subscriberCount : ch.subscriber_count,
       } : ch));
 
       addToast(`Synced "${data.channelName}"! ${newYtVideos.length} new videos found.`, 'success');

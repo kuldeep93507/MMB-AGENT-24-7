@@ -1,10 +1,10 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 
 export async function fetchServerScheduleTimers(): Promise<
   { id: string; name: string; nextRun: number; repeat: string | null }[]
 > {
   try {
-    const res = await fetch(backendUrl('/api/schedule/timer/list'));
+    const res = await backendFetch('/api/schedule/timer/list');
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data) ? data : [];
@@ -15,7 +15,7 @@ export async function fetchServerScheduleTimers(): Promise<
 
 export async function fetchSchedulesFromServer(): Promise<unknown[] | null> {
   try {
-    const res = await fetch(backendUrl('/api/schedules'));
+    const res = await backendFetch('/api/schedules');
     if (!res.ok) return null;
     const data = await res.json();
     return Array.isArray(data.schedules) ? data.schedules : null;
@@ -26,7 +26,7 @@ export async function fetchSchedulesFromServer(): Promise<unknown[] | null> {
 
 export async function syncSchedulesToServer(schedules: unknown[]): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/schedules'), {
+    const res = await backendFetch('/api/schedules', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ schedules }),
@@ -39,7 +39,7 @@ export async function syncSchedulesToServer(schedules: unknown[]): Promise<boole
 
 export async function setServerScheduleTimer(schedule: unknown): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/schedule/timer/set'), {
+    const res = await backendFetch('/api/schedule/timer/set', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ schedule }),
@@ -52,7 +52,7 @@ export async function setServerScheduleTimer(schedule: unknown): Promise<boolean
 
 export async function cancelServerScheduleTimer(scheduleId: string): Promise<void> {
   try {
-    await fetch(backendUrl('/api/schedule/timer/cancel'), {
+    await backendFetch('/api/schedule/timer/cancel', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ scheduleId }),
@@ -68,7 +68,7 @@ export async function fetchConcurrency(): Promise<{
   available: number;
 } | null> {
   try {
-    const res = await fetch(backendUrl('/api/concurrency'));
+    const res = await backendFetch('/api/concurrency');
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -90,7 +90,7 @@ export async function fetchScheduleProgress(
   if (!profileIds.length) return null;
   try {
     const qs = profileIds.map(encodeURIComponent).join(',');
-    const res = await fetch(backendUrl(`/api/schedule/progress?profileIds=${qs}`));
+    const res = await backendFetch(`/api/schedule/progress?profileIds=${qs}`);
     if (!res.ok) return null;
     const data = await res.json();
     return data.stats ?? null;

@@ -2,16 +2,17 @@
  * MoreLogin Local API Service
  * Base URL: http://127.0.0.1:40000
  * Docs: https://guide.morelogin.com/api-reference/browser
+ *
+ * Never put the API key in browser code — `Authorization` is injected by Vite's `/morelogin-api` proxy
+ * from `.env` `MORELOGIN_API_KEY` (see vite.config.ts).
  */
 
 // In dev mode, use Vite proxy to avoid CORS. In production, use direct URL.
 const BASE_URL = '/morelogin-api';
-const API_KEY = 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e';
 
 function getHeaders(): Record<string, string> {
   return {
     'Content-Type': 'application/json',
-    'Authorization': API_KEY,
   };
 }
 

@@ -8,9 +8,10 @@ interface TopBarProps {
   profiles: Profile[];
   logs: LogEntry[];
   activeTab: string;
+  newVideoCount?: number;
 }
 
-export default function TopBar({ profiles, logs, activeTab }: TopBarProps) {
+export default function TopBar({ profiles, logs, activeTab, newVideoCount = 0 }: TopBarProps) {
   const [time, setTime] = useState(new Date());
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -101,6 +102,17 @@ export default function TopBar({ profiles, logs, activeTab }: TopBarProps) {
 
         {/* Right side */}
         <div className="flex items-center gap-3 ml-auto flex-shrink-0">
+          {/* New video notification bell */}
+          {newVideoCount > 0 && (
+            <div className="relative flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-900/30 border border-red-600/40 text-red-300 text-xs font-medium animate-pulse">
+              <Bell size={12} className="text-red-400" />
+              <span>{newVideoCount} new video{newVideoCount > 1 ? 's' : ''}</span>
+              <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-red-500 text-white text-[9px] font-bold flex items-center justify-center">
+                {newVideoCount}
+              </span>
+            </div>
+          )}
+
           {/* Notification toggle */}
           <button onClick={handleNotifToggle}
             className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-all ${notifEnabled ? 'bg-green-900/30 text-green-400 border border-green-700/30' : 'bg-gray-800 text-gray-500 border border-gray-700'}`}>

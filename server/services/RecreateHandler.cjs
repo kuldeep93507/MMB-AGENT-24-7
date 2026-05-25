@@ -134,15 +134,28 @@ class RecreateHandler {
       const stopResult = await this._stopWithTimeout(profileId, browserType, options.cdpPort);
 
       if (!stopResult.success) {
-        // Stop timeout or failure → abort, restore previous status
-        if (statusCallback) {
-          statusCallback(profileId, currentStatus);
+        // Check if failure is a "zombie" stop — browser not responding but may actually be dead.
+        // "Could not stop profile — browser may still be open in Multilogin" means all launcher
+        // endpoints returned errors but we can't confirm the process is live.
+        // In this case: proceed to deletion anyway (Cloud API delete works regardless of launcher state).
+        const isZombieOrUnreachable = stopResult.error && (
+          /could not stop|browser may still be open|not running|already stopped/i.test(stopResult.error)
+        );
+
+        if (isZombieOrUnreachable) {
+          console.warn(`[RecreateHandler] Stop soft-failed (zombie/unreachable) — proceeding to deletion: ${stopResult.error}`);
+          // Fall through to Step 4: deletion
+        } else {
+          // Hard failure (timeout, network, auth error) → abort and restore previous status
+          if (statusCallback) {
+            statusCallback(profileId, currentStatus);
+          }
+          return {
+            code: -8,
+            message: `Recreate aborted: failed to stop profile within ${STOP_TIMEOUT_MS / 1000} seconds. ${stopResult.error || ''}`.trim(),
+            data: null,
+          };
         }
-        return {
-          code: -8,
-          message: `Recreate aborted: failed to stop profile within ${STOP_TIMEOUT_MS / 1000} seconds. ${stopResult.error || ''}`.trim(),
-          data: null,
-        };
       }
     }
 

@@ -14,9 +14,9 @@ import {
   Megaphone,
   Route,
   Activity,
+  Zap,
 } from 'lucide-react';
 import type { Profile } from '../types';
-import LiveProgressPanel from './LiveProgressPanel';
 import RateLimitDashboard from './RateLimitDashboard';
 import {
   fetchAnalytics,
@@ -27,7 +27,8 @@ import {
 } from '../utils/analyticsApi';
 
 interface AnalyticsPageProps {
-  profiles: Profile[];
+  profiles:      Profile[];
+  setActiveTab?: (tab: string) => void;
 }
 
 type ProfileSortKey = 'name' | 'views' | 'watchTime' | 'likes';
@@ -66,7 +67,7 @@ function actionLabel(action: string): string {
   return map[action] || action;
 }
 
-export default function AnalyticsPage({ profiles }: AnalyticsPageProps) {
+export default function AnalyticsPage({ profiles, setActiveTab }: AnalyticsPageProps) {
   const [timeFilter, setTimeFilter] = useState<AnalyticsTimeFilter>('today');
   const [liveData, setLiveData] = useState<AnalyticsResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -178,6 +179,15 @@ export default function AnalyticsPage({ profiles }: AnalyticsPageProps) {
                 </button>
               ))}
             </div>
+            {setActiveTab && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('engagement')}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-yellow-900/30 border border-yellow-700/40 text-yellow-400 hover:bg-yellow-900/50 transition-all"
+              >
+                <Zap size={13} /> Engagement →
+              </button>
+            )}
             {liveData && (
               <button
                 type="button"
@@ -281,8 +291,6 @@ export default function AnalyticsPage({ profiles }: AnalyticsPageProps) {
             </div>
           </div>
         )}
-
-        <LiveProgressPanel />
 
         <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
           <div className="flex flex-wrap items-center justify-between gap-3 mb-4">

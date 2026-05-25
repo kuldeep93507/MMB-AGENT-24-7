@@ -1,4 +1,4 @@
-import { backendUrl, getAuthHeaders, storeApiToken } from '../services/backendOrigin';
+import { backendFetch, getAuthHeaders, storeApiToken } from '../services/backendOrigin';
 import type { LogEntry, LogLevel, LogSource } from '../types';
 
 export interface FetchLogsParams {
@@ -20,7 +20,7 @@ export interface ActivityLogsResponse {
 async function ensureApiToken(): Promise<void> {
   if (getAuthHeaders()['X-MMB-Token']) return;
   try {
-    const res = await fetch(backendUrl('/api/settings'));
+    const res = await backendFetch('/api/settings');
     if (!res.ok) return;
     const data = await res.json();
     if (typeof data.apiToken === 'string' && data.apiToken) storeApiToken(data.apiToken);
@@ -36,8 +36,7 @@ export async function fetchActivityLogs(params: FetchLogsParams = {}): Promise<A
   if (params.profileId) q.set('profileId', params.profileId);
   if (params.search) q.set('search', params.search);
 
-  const url = backendUrl(`/api/logs${q.toString() ? `?${q}` : ''}`);
-  const res = await fetch(url);
+  const res = await backendFetch(`/api/logs${q.toString() ? `?${q}` : ''}`);
   if (!res.ok) throw new Error(`Logs API ${res.status}`);
   return res.json();
 }
@@ -48,7 +47,7 @@ export async function postActivityLog(
   opts?: { profileId?: string; profileName?: string; source?: LogSource; id?: string },
 ): Promise<void> {
   try {
-    await fetch(backendUrl('/api/logs'), {
+    await backendFetch('/api/logs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -69,7 +68,7 @@ export async function postActivityLog(
 export async function clearActivityLogs(): Promise<{ ok: boolean; error?: string }> {
   try {
     await ensureApiToken();
-    const res = await fetch(backendUrl('/api/logs'), { method: 'DELETE', headers: getAuthHeaders() });
+    const res = await backendFetch('/api/logs', { method: 'DELETE', headers: getAuthHeaders() });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       return { ok: false, error: data.message || data.error || `HTTP ${res.status}` };

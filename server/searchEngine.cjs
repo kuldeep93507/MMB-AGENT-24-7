@@ -236,18 +236,54 @@ async function runPrimaryTrafficSource(page, source, ctx) {
 // YOUTUBE SEARCH WITH ESCALATION + VERIFICATION
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function gotoYouTubeSearchResults(page, query, humanTypeFn) {
+  const currentUrl = page.url() || '';
+  const onYouTube = currentUrl.includes('youtube.com');
+
+  // ── PATH A: Already on YouTube — use search bar directly ─────────────────
+  if (onYouTube) {
+    // Scroll to top so search bar is visible/accessible
+    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+    await sleep(randomDelay(200, 400));
+    const typed = await typeInSearchBar(page, query, humanTypeFn);
+    if (typed) {
+      await sleep(randomDelay(400, 800));
+      await page.keyboard.press('Enter');
+      await sleep(randomDelay(800, 1500));
+      return;
+    }
+  }
+
+  // ── PATH B: Not on YouTube — navigate via address bar typing ─────────────
+  // Human behavior: press Ctrl+L, type "youtube.com", Enter, then search
+  try {
+    await page.keyboard.press('Control+l');
+    await sleep(randomDelay(300, 650));
+    await page.keyboard.press('Control+a');
+    await sleep(randomDelay(50, 130));
+    await page.keyboard.press('Backspace');
+    await sleep(randomDelay(180, 380));
+    await humanTypeFn(page, 'youtube.com');
+    await sleep(randomDelay(300, 650));
+    await page.keyboard.press('Enter');
+    // Wait for YouTube to fully load
+    await page.waitForLoadState('domcontentloaded', { timeout: 28000 }).catch(() => {});
+    await sleep(randomDelay(1500, 3000));
+
+    // Now type search query in the YouTube search bar
+    const typed = await typeInSearchBar(page, query, humanTypeFn);
+    if (typed) {
+      await sleep(randomDelay(400, 800));
+      await page.keyboard.press('Enter');
+      await sleep(randomDelay(800, 1500));
+      return;
+    }
+  } catch { /* fall through to URL fallback */ }
+
+  // ── FALLBACK: Direct URL only if both typing paths failed ─────────────────
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
   try {
     await page.goto(url, { waitUntil: 'commit', timeout: 28000 });
   } catch {
-    if (page.url().includes('youtube.com')) {
-      const typed = await typeInSearchBar(page, query, humanTypeFn);
-      if (typed) {
-        await page.keyboard.press('Enter');
-        await sleep(randomDelay(1000, 1800));
-        return;
-      }
-    }
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {});
   }
   await sleep(randomDelay(500, 1100));
@@ -614,8 +650,42 @@ async function searchChannelPage(page, videoTitle, channelName, expectedDuration
   log('info', `[Channel] Going to "${channelName}" channel page...`);
   
   try {
-    // Search for channel on YouTube
-    await page.goto(`https://www.youtube.com/results?search_query=${encodeURIComponent(channelName)}`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    // Search for channel — navigate to YouTube via address bar first, then type channel name
+    const chCurrentUrl = page.url() || '';
+    const chOnYouTube = chCurrentUrl.includes('youtube.com');
+    let chNavOk = false;
+    if (!chOnYouTube) {
+      try {
+        await page.keyboard.press('Control+l');
+        await sleep(randomDelay(300, 600));
+        await page.keyboard.press('Control+a');
+        await sleep(randomDelay(50, 120));
+        await page.keyboard.press('Backspace');
+        await sleep(randomDelay(180, 350));
+        await humanTypeFn(page, 'youtube.com');
+        await sleep(randomDelay(300, 600));
+        await page.keyboard.press('Enter');
+        await page.waitForLoadState('domcontentloaded', { timeout: 25000 }).catch(() => {});
+        await sleep(randomDelay(1200, 2500));
+        chNavOk = true;
+      } catch { /* fall through */ }
+    } else {
+      chNavOk = true;
+    }
+    if (!chNavOk) {
+      await page.goto(`https://www.youtube.com/results?search_query=${encodeURIComponent(channelName)}`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    } else {
+      // Type channel name in search bar
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      await sleep(randomDelay(200, 400));
+      const chTyped = await typeInSearchBar(page, channelName, humanTypeFn);
+      if (chTyped) {
+        await sleep(randomDelay(400, 700));
+        await page.keyboard.press('Enter');
+      } else {
+        await page.goto(`https://www.youtube.com/results?search_query=${encodeURIComponent(channelName)}`, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      }
+    }
     await sleep(randomDelay(3000, 5000));
     
     // Click the channel that matches the expected name (not the first result)
@@ -862,7 +932,7 @@ async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuratio
 
         if (verification.isMatch) {
           if (typeof log === 'function') {
-            log('info', `[YT] Match found: "${result.title}" / "${result.channel}" (score: ${verification.score}) — clicking index ${result.index}...`);
+            log('info', `[YT] Match: "${result.title}" / "${result.channel}" (score:${verification.score}) — index ${result.index}`);
           }
 
           if (expectedVideoId) {
@@ -873,7 +943,74 @@ async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuratio
             }
           }
 
-          const clickedInEval = await page.evaluate((idx) => {
+          // FIX Bug 7: Human-like thumbnail hover BEFORE clicking
+          // First move mouse to thumbnail, glance at it, THEN move to title and click
+          const videoEls = await page.$$('ytd-video-renderer');
+          const videoEl = videoEls[result.index];
+          if (videoEl) {
+            try {
+              // Step 1: Hover thumbnail (left side of card)
+              const thumbEl = await videoEl.$('ytd-thumbnail, a#thumbnail, img.yt-core-image').catch(() => null);
+              if (thumbEl) {
+                const thumbBox = await thumbEl.boundingBox().catch(() => null);
+                if (thumbBox && thumbBox.width > 0) {
+                  await page.mouse.move(
+                    thumbBox.x + randomDelay(20, thumbBox.width - 20),
+                    thumbBox.y + randomDelay(10, thumbBox.height - 10),
+                    { steps: randomDelay(6, 14) },
+                  );
+                  await sleep(randomDelay(300, 700)); // glance at thumbnail
+                }
+              }
+              // Step 2: Move to channel name to verify (human checks channel)
+              const channelEl = await videoEl.$('ytd-channel-name a, .ytd-channel-name').catch(() => null);
+              if (channelEl) {
+                const chBox = await channelEl.boundingBox().catch(() => null);
+                if (chBox && chBox.width > 0) {
+                  await page.mouse.move(
+                    chBox.x + chBox.width / 2,
+                    chBox.y + chBox.height / 2,
+                    { steps: randomDelay(4, 9) },
+                  );
+                  await sleep(randomDelay(150, 400));
+                }
+              }
+              // Step 3: Move to title and click
+              const titleEl = await videoEl.$('a#video-title').catch(() => null);
+              if (titleEl) {
+                const titleBox = await titleEl.boundingBox().catch(() => null);
+                if (titleBox && titleBox.width > 0) {
+                  await page.mouse.move(
+                    titleBox.x + randomDelay(10, titleBox.width - 10),
+                    titleBox.y + titleBox.height / 2,
+                    { steps: randomDelay(5, 10) },
+                  );
+                  await sleep(randomDelay(200, 500));
+                  await page.mouse.click(
+                    titleBox.x + randomDelay(10, titleBox.width - 10),
+                    titleBox.y + titleBox.height / 2,
+                  );
+                  const navigated = expectedVideoId
+                    ? await waitForWatchPage(page, expectedVideoId, 18000)
+                    : true;
+                  if (!navigated) {
+                    if (typeof log === 'function') log('warn', `[YT] Click did not load watch page — next result`);
+                    continue;
+                  }
+                  if (typeof log === 'function') log('success', `[YT] Human-clicked result at index ${result.index}`);
+                  await sleep(randomDelay(clickWaitMin, clickWaitMax));
+                  return true;
+                }
+                // Fallback: Playwright click
+                await titleEl.click();
+                await sleep(2000);
+                return true;
+              }
+            } catch { /* fall through to JS click */ }
+          }
+
+          // Last resort: JS click
+          const clicked = await page.evaluate((idx) => {
             const videos = document.querySelectorAll('ytd-video-renderer');
             const el = videos[idx];
             if (!el) return false;
@@ -883,33 +1020,9 @@ async function findAndVerifyVideo(page, videoTitle, channelName, expectedDuratio
             return true;
           }, result.index).catch(() => false);
 
-          if (clickedInEval) {
-            const navigated = expectedVideoId
-              ? await waitForWatchPage(page, expectedVideoId, 18000)
-              : true;
-            if (!navigated) {
-              if (typeof log === 'function') log('warn', `[YT] Title match click did not load watch page — next result`);
-              continue;
-            }
-            if (typeof log === 'function') log('success', `[YT] Clicked verified result at index ${result.index}`);
+          if (clicked) {
             await sleep(randomDelay(clickWaitMin, clickWaitMax));
             return true;
-          }
-
-          const videoEls = await page.$$('ytd-video-renderer a#video-title');
-          if (videoEls && videoEls[result.index]) {
-            try {
-              const box = await videoEls[result.index].boundingBox();
-              if (box) {
-                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: randomDelay(5, 12) });
-                await sleep(randomDelay(300, 800));
-              }
-              await videoEls[result.index].click();
-              await sleep(2000);
-              return true;
-            } catch {
-              try { await videoEls[result.index].click(); await sleep(2000); return true; } catch {}
-            }
           }
         }
       }

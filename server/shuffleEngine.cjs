@@ -18,6 +18,7 @@ const DEFAULT_SETTINGS = {
   adSkipEnabled: true,
   adSkipAfterSec: 5,
   midRollAdWaitSec: 10,
+  warmupEnabled: true,
 };
 
 function normalizeWatchTitle(title) {
@@ -48,6 +49,7 @@ function normalizeSettings(raw) {
     adSkipEnabled: merged.adSkipEnabled !== false,
     adSkipAfterSec: Math.max(0, Math.min(120, Number(merged.adSkipAfterSec) || 5)),
     midRollAdWaitSec: Math.max(0, Math.min(120, Number(merged.midRollAdWaitSec) || 10)),
+    warmupEnabled: merged.warmupEnabled !== false,
   };
 }
 
@@ -93,7 +95,9 @@ function loadChannelVideoMap() {
   }
   const byChannel = {};
   for (const v of bundle.videos || []) {
-    if (v.is_enabled === 0 || v.is_enabled === false || v.status === 'unavailable') continue;
+    // Skip only unavailable (deleted/private) videos — respect is_enabled only as a soft filter.
+    // Fall back to all channel videos if none are explicitly enabled (is_enabled=1).
+    if (v.status === 'unavailable') continue;
     const cid = v.channel_id;
     if (!byChannel[cid]) byChannel[cid] = [];
     byChannel[cid].push({
@@ -289,6 +293,7 @@ function buildProfileConfig(profileId, browserType, settings) {
     adSkipEnabled: settings.adSkipEnabled !== false,
     adSkipAfterSec: settings.adSkipAfterSec ?? 5,
     midRollAdWaitSec: settings.midRollAdWaitSec ?? 10,
+    warmupEnabled: settings.warmupEnabled !== false,
     humanEngagementEnabled: true,
     seekForwardMax: 2,
     seekForwardSec: 10,

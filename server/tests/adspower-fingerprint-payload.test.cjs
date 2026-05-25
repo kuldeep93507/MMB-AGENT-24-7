@@ -28,7 +28,8 @@ describe('AdsPowerProvider.buildFingerprintPayload', () => {
 
     expect(payload.webrtc).toBe('disabled');
     expect(payload.ua).toBe(config.userAgent);
-    expect(payload.screen_resolution).toBe('1920x1080');
+    // AdsPower Local API expects width_height with underscore separator
+    expect(payload.screen_resolution).toBe('1920_1080');
     expect(payload.language).toEqual(['en-US']);
     expect(payload.timezone).toEqual({ timezone: 'America/Chicago' });
     expect(payload.canvas).toBe('1');
@@ -37,12 +38,16 @@ describe('AdsPowerProvider.buildFingerprintPayload', () => {
     expect(payload.webgl_image_seed).toBe('ef56gh78');
     expect(payload.audio).toBe('1');
     expect(payload.audio_seed).toBe('ij90kl12');
-    expect(payload.location).toEqual({ lat: 32.7767, lng: -96.7970 });
+    expect(payload.location_switch).toBe(1);
+    expect(payload.latitude).toBe('32.7767');
+    expect(payload.longitude).toBe('-96.797');
+    expect(payload.accuracy).toBe('1000');
     expect(payload.fonts).toEqual(['Arial', 'Verdana', 'Tahoma']);
-    expect(payload.media_devices).toEqual({
-      audio_inputs: 2,
-      video_inputs: 1,
-      audio_outputs: 3,
+    expect(payload.media_devices).toBe('1');
+    expect(payload.media_devices_num).toEqual({
+      audioinput: 2,
+      videoinput: 1,
+      audiooutput: 3,
     });
   });
 
@@ -52,6 +57,7 @@ describe('AdsPowerProvider.buildFingerprintPayload', () => {
       timezone: 'America/New_York',
       // language is undefined
       // resolution is undefined
+      // Internal 'real' maps to AdsPower webrtc mode 'local'
       webRTC: 'real',
       canvasNoise: { enabled: true, seed: 'seed1234' },
       // webGLNoise is undefined
@@ -64,7 +70,7 @@ describe('AdsPowerProvider.buildFingerprintPayload', () => {
     const payload = provider.buildFingerprintPayload(config);
 
     expect(payload.ua).toBe('Mozilla/5.0 Test');
-    expect(payload.webrtc).toBe('real');
+    expect(payload.webrtc).toBe('local');
     expect(payload.timezone).toEqual({ timezone: 'America/New_York' });
     expect(payload.canvas).toBe('1');
     expect(payload.canvas_seed).toBe('seed1234');
@@ -136,6 +142,11 @@ describe('AdsPowerProvider.buildFingerprintPayload', () => {
     };
 
     const payload = provider.buildFingerprintPayload(config);
-    expect(payload.media_devices).toEqual({ audio_inputs: 2 });
+    expect(payload.media_devices).toBe('1');
+    expect(payload.media_devices_num).toEqual({
+      audioinput: 2,
+      videoinput: 1,
+      audiooutput: 1,
+    });
   });
 });

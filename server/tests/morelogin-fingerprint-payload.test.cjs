@@ -5,6 +5,10 @@ const { MoreLoginProvider } = require('../providers/MoreLoginProvider.cjs');
 describe('MoreLoginProvider.buildFingerprintPayload', () => {
   let provider;
 
+  beforeAll(() => {
+    if (!process.env.MORELOGIN_API_KEY) process.env.MORELOGIN_API_KEY = 'test_dummy_key_for_jest_only';
+  });
+
   beforeEach(() => {
     provider = new MoreLoginProvider();
   });

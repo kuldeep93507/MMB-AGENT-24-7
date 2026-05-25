@@ -1,7 +1,7 @@
-import { backendUrl, getAuthHeaders, storeApiToken } from '../services/backendOrigin';
+import { backendFetch, getAuthHeaders } from '../services/backendOrigin';
 
 export async function fetchAllProfileConfigs(): Promise<Record<string, unknown>> {
-  const res = await fetch(backendUrl('/api/profile-configs'));
+  const res = await backendFetch('/api/profile-configs');
   if (!res.ok) return {};
   const data = await res.json();
   return data.configs && typeof data.configs === 'object' ? data.configs : {};
@@ -9,7 +9,7 @@ export async function fetchAllProfileConfigs(): Promise<Record<string, unknown>>
 
 export async function saveProfileConfigToServer(profileId: string, config: unknown): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl(`/api/profile-config/${profileId}`), {
+    const res = await backendFetch(`/api/profile-config/${profileId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({ config }),
@@ -30,7 +30,7 @@ export async function hydrateProfileConfigsFromServer(): Promise<void> {
 }
 
 export async function fetchCommentsFromServer(): Promise<unknown[]> {
-  const res = await fetch(backendUrl('/api/comments'));
+  const res = await backendFetch('/api/comments');
   if (!res.ok) return [];
   const data = await res.json();
   return Array.isArray(data.comments) ? data.comments : [];
@@ -38,7 +38,7 @@ export async function fetchCommentsFromServer(): Promise<unknown[]> {
 
 export async function saveCommentsToServer(comments: unknown[]): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/comments'), {
+    const res = await backendFetch('/api/comments', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify({ comments }),
@@ -59,7 +59,7 @@ export async function hydrateCommentsFromServer(): Promise<void> {
 }
 
 export async function fetchChannelsBundleFromServer() {
-  const res = await fetch(backendUrl('/api/channels-data'));
+  const res = await backendFetch('/api/channels-data');
   if (!res.ok) return null;
   const data = await res.json();
   return data;
@@ -71,7 +71,7 @@ export async function saveChannelsBundleToServer(bundle: {
   playlists: unknown[];
 }): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/channels-data'), {
+    const res = await backendFetch('/api/channels-data', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(bundle),

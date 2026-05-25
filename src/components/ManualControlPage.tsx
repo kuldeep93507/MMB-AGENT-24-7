@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { CheckSquare, Square, Play, Pause, SkipForward, StopCircle, Search, Plus, X, Monitor, Smartphone, Apple } from 'lucide-react';
 import type { Profile } from '../types';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // TYPES
@@ -119,7 +119,7 @@ export default function ManualControlPage({ profiles }: ManualControlPageProps) 
     if (selectedIds.length === 0) return;
     try {
       setError(null);
-      const res = await fetch(backendUrl('/api/manual/batch'), {
+      const res = await backendFetch('/api/manual/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profileIds: selectedIds, command, params }),
@@ -189,7 +189,7 @@ export default function ManualControlPage({ profiles }: ManualControlPageProps) 
     if (selectedIds.length === 0) return;
     try {
       setError(null);
-      const res = await fetch(backendUrl('/api/manual/start'), {
+      const res = await backendFetch('/api/manual/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profileIds: selectedIds }),

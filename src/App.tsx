@@ -13,8 +13,12 @@ import AnalyticsPage from './components/AnalyticsPage';
 import CommentTemplatesPage from './components/CommentTemplatesPage';
 import VideoShufflePage from './components/VideoShufflePage';
 import BacklinkPoolPage from './components/BacklinkPoolPage';
+import MonitorPage from './components/MonitorPage';
+import EngagementPage from './components/EngagementPage';
+import GmailSetupPage from './components/GmailSetupPage';
 import SplashScreen from './components/SplashScreen';
 import { useStore } from './store/useStore';
+import { useVideoMonitor } from './hooks/useVideoMonitor';
 import { useChannelStore } from './store/useChannelStore';
 import { isMultiloginProxyHost } from './utils/profileAdapter';
 import type { OS } from './types';
@@ -42,6 +46,7 @@ export default function App() {
   } = useStore();
 
   const channelStore = useChannelStore();
+  const videoMonitor = useVideoMonitor();
   const activeChannelsCount = channelStore.channels.filter(ch => ch.status === 'active').length;
 
   const runningCount = profiles.filter(p => p.status === 'running').length;
@@ -64,7 +69,7 @@ export default function App() {
   useEffect(() => {
     if (activeTab === 'proxy-health') {
       setActiveTab('dashboard');
-    } else if (activeTab === 'engagement' || activeTab === 'performance' || activeTab === 'orchestrator-log' || activeTab === 'video-manager' || activeTab === 'yt-agents') {
+    } else if (activeTab === 'performance' || activeTab === 'orchestrator-log' || activeTab === 'video-manager' || activeTab === 'yt-agents') {
       setActiveTab('channels');
     }
   }, [activeTab, setActiveTab]);
@@ -72,7 +77,9 @@ export default function App() {
   const renderPage = () => {
     switch (activeTab) {
       case 'dashboard':
-        return <Dashboard profiles={profiles} setActiveTab={setActiveTab} onRefreshProfiles={() => fetchProfiles()} />;
+        return <Dashboard profiles={profiles} setActiveTab={setActiveTab} />;
+      case 'monitor':
+        return <MonitorPage profiles={profiles} onRefreshProfiles={() => fetchProfiles()} canStartRecycle={false} />;
       case 'profiles':
         return (
           <ProfilesPage
@@ -121,6 +128,7 @@ export default function App() {
             toasts={channelStore.toasts}
             dismissToast={channelStore.dismissToast}
             forceSyncToServer={channelStore.forceSyncToServer}
+            videoMonitor={videoMonitor}
           />
         );
       case 'jobs':
@@ -134,9 +142,13 @@ export default function App() {
       case 'manual':
         return <ManualControlPage profiles={profiles} />;
       case 'analytics':
-        return <AnalyticsPage profiles={profiles} />;
+        return <AnalyticsPage profiles={profiles} setActiveTab={setActiveTab} />;
       case 'comments':
         return <CommentTemplatesPage />;
+      case 'engagement':
+        return <EngagementPage profiles={profiles} channels={channelStore.channels} getVideos={channelStore.getVideos} setActiveTab={setActiveTab} />;
+      case 'gmail-setup':
+        return <GmailSetupPage profiles={profiles} />;
       case 'logs':
         return <LogsPage profiles={profiles} onClear={clearLogs} />;
       case 'settings':
@@ -158,7 +170,7 @@ export default function App() {
         activeChannels={activeChannelsCount}
       />
       <main className="flex-1 overflow-hidden flex flex-col">
-        <TopBar profiles={profiles} logs={logs} activeTab={activeTab} />
+        <TopBar profiles={profiles} logs={logs} activeTab={activeTab} newVideoCount={videoMonitor.unreadCount} />
         <div className="flex-1 overflow-hidden flex flex-col">
           {renderPage()}
         </div>

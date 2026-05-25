@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { X, Monitor, Smartphone, Apple, Zap, ChevronRight, Wifi, Globe, Cloud, Cpu, RotateCcw } from "lucide-react";
 import type { OS } from "../types";
-import { backendUrl } from "../services/backendOrigin";
+import { backendFetch } from '../services/backendOrigin';
 
 type ActiveProvider = 'morelogin' | 'multilogin' | 'all';
 type CreateProvider = 'morelogin' | 'multilogin';
@@ -37,7 +37,7 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
   }, [createProvider, activeProvider]);
 
   useEffect(() => {
-    fetch(backendUrl('/api/android-devices'))
+    backendFetch('/api/android-devices')
       .then(r => r.json())
       .then(d => {
         if (d.code === 0 && d.data?.devices?.length) {
@@ -58,7 +58,7 @@ export default function NewProfileModal({ onClose, onCreate, activeProvider = 'm
   const [proxyType, setProxyType] = useState<'smartproxy' | 'multilogin'>('smartproxy');
 
   useEffect(() => {
-    fetch(backendUrl('/api/settings'))
+    backendFetch('/api/settings')
       .then((r) => r.json())
       .then((d) => {
         const saved = d?.settings?.ytProxyType;

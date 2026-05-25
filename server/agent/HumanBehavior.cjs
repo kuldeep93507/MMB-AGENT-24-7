@@ -71,9 +71,41 @@ async function smoothScroll(page, totalPixels, direction = 'down', personality =
   await sleep(randomDelay(220, 620));
 }
 
+/**
+ * Type a URL in the browser address bar like a human (Ctrl+L → type → Enter).
+ * Returns true if succeeded, false if fell through to goto fallback.
+ * Falls back gracefully — caller must do page.goto() if this returns false.
+ */
+async function typeUrlInAddressBar(page, url, profileSpeed) {
+  // Only type the display portion (no https://, no trailing slash)
+  const displayText = url.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  try {
+    // Focus address bar — Ctrl+L works on Windows/Linux, F6 is universal fallback
+    await page.keyboard.press('Control+l');
+    await sleep(randomDelay(300, 600));
+
+    // Select all existing text and clear it
+    await page.keyboard.press('Control+a');
+    await sleep(randomDelay(50, 120));
+    await page.keyboard.press('Backspace');
+    await sleep(randomDelay(200, 400));
+
+    // Type the URL character by character (human speed)
+    await humanType(page, displayText, profileSpeed);
+    await sleep(randomDelay(300, 600));
+
+    await page.keyboard.press('Enter');
+    await sleep(randomDelay(1200, 2500));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 module.exports = {
   seekForwardKeyboard,
   humanType,
   humanMouseMove,
   smoothScroll,
+  typeUrlInAddressBar,
 };

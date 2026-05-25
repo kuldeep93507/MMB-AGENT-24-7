@@ -1,4 +1,4 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import { fetchScheduleProgress } from './scheduleApi';
 import { stopScheduleRun } from './shuffleApi';
 
@@ -62,7 +62,7 @@ function normalizeBacklink(b: Partial<Backlink> & { sourceUrl: string }): Backli
 
 export async function fetchBacklinksFromServer(): Promise<BacklinksState | null> {
   try {
-    const res = await fetch(backendUrl('/api/backlinks'));
+    const res = await backendFetch('/api/backlinks');
     if (!res.ok) return null;
     const data = await res.json();
     return {
@@ -76,7 +76,7 @@ export async function fetchBacklinksFromServer(): Promise<BacklinksState | null>
 
 export async function syncBacklinksToServer(state: BacklinksState): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/backlinks'), {
+    const res = await backendFetch('/api/backlinks', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(state),

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { X, Globe, Monitor, Fingerprint, Clock, RefreshCw, Heart, Shuffle, AlertCircle, CheckCircle } from 'lucide-react';
 import type { Profile } from '../types';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import * as multiloginXApi from '../services/multiloginXApi';
 
 interface ProfileSettingsProps {
@@ -152,7 +152,7 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
     if (activeTab !== 'history') return;
     let cancelled = false;
     setHistoryLoading(true);
-    fetch(backendUrl(`/api/history/${encodeURIComponent(profile.id)}`))
+    backendFetch(`/api/history/${encodeURIComponent(profile.id)}`)
       .then((r) => r.json())
       .then((rows: unknown) => {
         if (cancelled || !Array.isArray(rows)) return;
@@ -506,7 +506,7 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
                   {/* Like */}
                   <div className="flex items-center gap-3 bg-gray-900 rounded-lg p-3">
                     <button onClick={() => setConfig({ ...config, likeEnabled: !config.likeEnabled })}
-                      className={`w-10 h-6 rounded-full relative transition-all ${config.likeEnabled ? 'bg-red-600' : 'bg-gray-700'}`}>
+                      className={`w-10 h-6 rounded-full relative transition-all ${config.likeEnabled ? 'bg-green-600' : 'bg-gray-700'}`}>
                       <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${config.likeEnabled ? 'left-5' : 'left-1'}`} />
                     </button>
                     <span className="text-sm text-gray-300 flex-1">👍 Like</span>
@@ -524,7 +524,7 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
                   {/* Subscribe */}
                   <div className="flex items-center gap-3 bg-gray-900 rounded-lg p-3">
                     <button onClick={() => setConfig({ ...config, subscribeEnabled: !config.subscribeEnabled })}
-                      className={`w-10 h-6 rounded-full relative transition-all ${config.subscribeEnabled ? 'bg-red-600' : 'bg-gray-700'}`}>
+                      className={`w-10 h-6 rounded-full relative transition-all ${config.subscribeEnabled ? 'bg-green-600' : 'bg-gray-700'}`}>
                       <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${config.subscribeEnabled ? 'left-5' : 'left-1'}`} />
                     </button>
                     <span className="text-sm text-gray-300 flex-1">🔔 Subscribe</span>
@@ -542,7 +542,7 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
                   {/* Comment */}
                   <div className="flex items-center gap-3 bg-gray-900 rounded-lg p-3">
                     <button onClick={() => setConfig({ ...config, commentEnabled: !config.commentEnabled })}
-                      className={`w-10 h-6 rounded-full relative transition-all ${config.commentEnabled ? 'bg-red-600' : 'bg-gray-700'}`}>
+                      className={`w-10 h-6 rounded-full relative transition-all ${config.commentEnabled ? 'bg-green-600' : 'bg-gray-700'}`}>
                       <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${config.commentEnabled ? 'left-5' : 'left-1'}`} />
                     </button>
                     <span className="text-sm text-gray-300 flex-1">💬 Comment</span>
@@ -609,7 +609,7 @@ export default function ProfileSettings({ profile, onClose, onRenewProxy }: Prof
                 <div className="space-y-3">
                   <div className="flex items-center gap-3 bg-gray-900 rounded-lg p-3">
                     <button onClick={() => setConfig({ ...config, adSkipEnabled: !config.adSkipEnabled })}
-                      className={`w-10 h-6 rounded-full relative transition-all ${config.adSkipEnabled ? 'bg-red-600' : 'bg-gray-700'}`}>
+                      className={`w-10 h-6 rounded-full relative transition-all ${config.adSkipEnabled ? 'bg-green-600' : 'bg-gray-700'}`}>
                       <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${config.adSkipEnabled ? 'left-5' : 'left-1'}`} />
                     </button>
                     <span className="text-sm text-gray-300 flex-1">Ad Skip {config.adSkipEnabled ? 'ON' : 'OFF'}</span>

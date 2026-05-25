@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react';
 import { Plus, Trash2, Play, Globe, Download, Upload, Search, Square, Pencil, AlertCircle } from 'lucide-react';
 import type { Profile } from '../types';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import { profileConfigsForSchedule } from '../utils/profileConfigsForSchedule';
 import LiveProgressPanel from './LiveProgressPanel';
 import { postActivityLog } from '../utils/logsApi';
@@ -215,7 +215,7 @@ export default function BacklinkPoolPage({ profiles }: BacklinkPoolPageProps) {
         profileConfigs: profileConfigsForSchedule(selectedProfiles, profiles),
       };
 
-      const res = await fetch(backendUrl('/api/schedule/run'), {
+      const res = await backendFetch('/api/schedule/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ schedule: scheduleData }),

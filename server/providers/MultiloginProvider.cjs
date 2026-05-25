@@ -67,6 +67,11 @@ class MultiloginProvider extends BrowserProvider {
     this.email = process.env.MULTILOGIN_EMAIL || '';
     this.password = process.env.MULTILOGIN_PASSWORD || '';
     this.folderId = process.env.MULTILOGIN_FOLDER_ID || '';
+    // Multiple folder IDs — comma-separated in MULTILOGIN_FOLDER_IDS env var
+    // Used for listing profiles from all folders + round-robin profile creation
+    this._folderIds = [];
+    this._folderRoundRobinIdx = 0;
+    this._loadFolderIds();
 
     // AUTOMATION TOKEN — permanent long-lived token (up to 1 month).
     // If MULTILOGIN_TOKEN is set in .env, use it directly — no email/password signin needed.
@@ -87,6 +92,33 @@ class MultiloginProvider extends BrowserProvider {
     if (!this.folderId) {
       console.error('[multilogin] MULTILOGIN_FOLDER_ID environment variable is not set');
     }
+  }
+
+  // ── Multi-folder helpers ──────────────────────────────────────────────────────
+  /** Load/refresh folder IDs from env vars. Called on construction and can be called on settings update. */
+  _loadFolderIds() {
+    const multi = (process.env.MULTILOGIN_FOLDER_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const primary = process.env.MULTILOGIN_FOLDER_ID || '';
+    const all = [...new Set([...(primary ? [primary] : []), ...multi])];
+    this._folderIds = all.length ? all : (primary ? [primary] : []);
+    // Update primary folderId in case it changed
+    if (primary) this.folderId = primary;
+    else if (this._folderIds.length) this.folderId = this._folderIds[0];
+  }
+
+  /** Get all folder IDs (primary + additional). Falls back to single folderId. */
+  _getAllFolderIds() {
+    this._loadFolderIds(); // refresh from env in case settings were updated
+    return this._folderIds.length ? this._folderIds : (this.folderId ? [this.folderId] : []);
+  }
+
+  /** Round-robin folder selection for profile creation. */
+  _getNextFolderId() {
+    const ids = this._getAllFolderIds();
+    if (!ids.length) return this.folderId || '';
+    const idx = this._folderRoundRobinIdx % ids.length;
+    this._folderRoundRobinIdx = (idx + 1) % ids.length;
+    return ids[idx];
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -462,7 +494,7 @@ class MultiloginProvider extends BrowserProvider {
     const body = {
       profile_id: templateId,
       name: (options && options.name) || `Profile ${Date.now()}`,
-      folder_id: this.folderId,
+      folder_id: this._getNextFolderId(),
       include_cookies: false,
       include_extensions: false,
       include_bookmarks: false,
@@ -1176,7 +1208,7 @@ class MultiloginProvider extends BrowserProvider {
     const browserType = (options && options.browserType === 'stealthfox') ? 'stealthfox' : 'mimic';
 
     const body = {
-      folder_id: this.folderId,
+      folder_id: this._getNextFolderId(),
       browser_type: browserType,
       os_type: osType,
       core_version: this._getCoreVersion(),
@@ -1711,7 +1743,7 @@ class MultiloginProvider extends BrowserProvider {
         proxyPort: Number.isFinite(proxyPort) ? proxyPort : undefined,
         proxyUsername: proxyUsername || undefined,
         userAgentHint: userAgentHint || undefined,
-        removedAt: item.removed_at || item.deleted_at || item.updated_at || null,
+        removedAt: item.removed_at || item.deleted_at || null,
       };
     });
   }
@@ -1720,8 +1752,9 @@ class MultiloginProvider extends BrowserProvider {
    * Search profiles in folder (active or trash).
    * @private
    */
-  async _searchProfiles(pageNo = 1, pageSize = 50, isRemoved = false) {
-    if (!this.folderId) {
+  async _searchProfiles(pageNo = 1, pageSize = 50, isRemoved = false, folderId = null) {
+    const effectiveFolderId = folderId || this.folderId;
+    if (!effectiveFolderId) {
       return this._errorResponse(-5, 'MULTILOGIN_FOLDER_ID environment variable is not set');
     }
 
@@ -1729,7 +1762,7 @@ class MultiloginProvider extends BrowserProvider {
     const offset = (pageNo - 1) * limit;
 
     const body = {
-      folder_id: this.folderId,
+      folder_id: effectiveFolderId,
       search_text: '',
       offset,
       limit,
@@ -1821,25 +1854,59 @@ class MultiloginProvider extends BrowserProvider {
       return this._errorResponse(-5, 'MULTILOGIN_FOLDER_ID environment variable is not set');
     }
 
-    // Clamp pageSize to 1-100 range
     const limit = Math.max(1, Math.min(100, pageSize));
+    const allFolderIds = this._getAllFolderIds();
 
-    const result = await this._searchProfiles(pageNo, limit, false);
-
-    if (result.code === 0 && result.data) {
-      const profileList = result.data.profiles || [];
-      const profiles = this._mapSearchProfiles(profileList);
-
-      const total = result.data.total_count || result.data.total || profiles.length;
-      return this._successResponse('Profiles retrieved successfully', {
-        profiles,
-        total,
-        pages: Math.ceil(total / limit) || 1,
-        current: pageNo,
-      });
+    // Single folder — standard paginated fetch
+    if (allFolderIds.length <= 1) {
+      const result = await this._searchProfiles(pageNo, limit, false);
+      if (result.code === 0 && result.data) {
+        const profileList = result.data.profiles || [];
+        const profiles = this._mapSearchProfiles(profileList);
+        const total = result.data.total_count || result.data.total || profiles.length;
+        return this._successResponse('Profiles retrieved successfully', {
+          profiles,
+          total,
+          pages: Math.ceil(total / limit) || 1,
+          current: pageNo,
+        });
+      }
+      return result;
     }
 
-    return result;
+    // Multiple folders — fetch from ALL folders (up to 100 each), combine, then paginate
+    const allProfiles = [];
+    for (const fid of allFolderIds) {
+      try {
+        const body = { folder_id: fid, search_text: '', offset: 0, limit: 100, is_removed: false };
+        const res = await this._authenticatedCloudRequest('/profile/search', { body });
+        if (res.code === 0 && res.data) {
+          const list = res.data.profiles || [];
+          const mapped = this._mapSearchProfiles(list);
+          allProfiles.push(...mapped);
+        }
+      } catch { /* skip failed folder */ }
+    }
+
+    // Deduplicate by profile ID
+    const seen = new Set();
+    const unique = allProfiles.filter(p => {
+      const id = p.id || p.profile_id;
+      if (!id || seen.has(id)) return false;
+      seen.add(id); return true;
+    });
+
+    // Apply pagination to combined list
+    const total = unique.length;
+    const offset = (pageNo - 1) * limit;
+    const page = unique.slice(offset, offset + limit);
+
+    return this._successResponse(`Profiles from ${allFolderIds.length} folders`, {
+      profiles: page,
+      total,
+      pages: Math.ceil(total / limit) || 1,
+      current: pageNo,
+    });
   }
 
   /**
@@ -1892,10 +1959,36 @@ class MultiloginProvider extends BrowserProvider {
     const rawType = String(proxy.type || proxy.protocol || 'http').toLowerCase();
     const typeMap = { http: 'http', https: 'https', socks5: 'socks5', socks4: 'socks4' };
     const apiType = typeMap[rawType] || 'http';
+
+    // Fetch current profile data — Multilogin cloud API requires name, browser_type,
+    // os_type, core_version, storage, and fingerprint even for proxy-only updates.
+    let profileName = `Profile_${profileId.slice(-4)}`;
+    let browserType = 'mimic';
+    let osType = 'windows';
+    let coreVersion = this._getCoreVersion();
+    try {
+      const search = await this._searchProfiles(1, 1, false);
+      if (search.code === 0 && search.data) {
+        const found = (search.data.profiles || []).find(p => p.id === profileId || p.profile_id === profileId);
+        if (found) {
+          profileName = found.name || profileName;
+          browserType = found.browser_type || browserType;
+          osType = found.os_type || osType;
+          coreVersion = found.core_version || coreVersion;
+        }
+      }
+    } catch (_) { /* use defaults if search fails */ }
+
     const body = {
       profile_id: profileId,
+      name: profileName,
+      browser_type: browserType,
+      os_type: osType,
+      core_version: coreVersion,
       parameters: {
         flags: this._defaultCloudFlags('custom'),
+        fingerprint: {},
+        storage: this._defaultCloudStorage(),
         proxy: {
           host,
           port: Number(port),

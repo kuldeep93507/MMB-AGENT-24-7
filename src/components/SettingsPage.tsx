@@ -1,13 +1,12 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import {
-  Save, RefreshCw, Globe, Database, Server, Shield, Eye, EyeOff, Monitor, Layers, Key, Folder,
+  Save, RefreshCw, Globe, Database, Server, Shield, Eye, EyeOff, Monitor, Key, Folder,
   Download, Upload, Zap, ExternalLink, Brain, Bell, Send, Trash2,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { BrowserProvider, ProviderSelection } from '../services/browserProviderApi';
 import {
   type AppSettings,
-  DEFAULT_APP_SETTINGS,
   loadSettingsLocal,
   saveSettingsLocal,
   fetchSettingsFromServer,
@@ -19,7 +18,7 @@ import {
   exportSettingsJson,
   parseSettingsImport,
 } from '../utils/settingsApi';
-import { backendUrl, getAuthHeaders } from '../services/backendOrigin';
+import { backendFetch, getAuthHeaders } from '../services/backendOrigin';
 import {
   loadNotificationPrefs,
   saveNotificationPrefs,
@@ -379,13 +378,64 @@ export default function SettingsPage() {
           <div className="grid grid-cols-1 gap-4">
             <div>
               <label className="text-gray-400 text-xs flex items-center gap-1 mb-1.5">
-                <Folder size={11} /> Folder ID
+                <Folder size={11} /> Primary Folder ID
               </label>
               <input
                 value={settings.multiloginFolderId}
                 onChange={(e) => update('multiloginFolderId', e.target.value)}
                 className="w-full bg-gray-800 border border-gray-700 text-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono"
               />
+            </div>
+            {/* Multi-folder support */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-gray-400 text-xs flex items-center gap-1">
+                  <Folder size={11} /> Additional Folder IDs
+                  <span className="text-gray-600 ml-1">— profiles are fetched from all folders</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ids = Array.isArray(settings.multiloginFolderIds) ? settings.multiloginFolderIds : [];
+                    update('multiloginFolderIds', [...ids, '']);
+                  }}
+                  className="text-xs px-2 py-1 rounded-lg bg-purple-600/20 text-purple-400 border border-purple-600/30 hover:bg-purple-600/30"
+                >
+                  + Add Folder
+                </button>
+              </div>
+              {(Array.isArray(settings.multiloginFolderIds) ? settings.multiloginFolderIds : []).length === 0 ? (
+                <p className="text-xs text-gray-600 italic">No additional folders — only primary folder is used</p>
+              ) : (
+                <div className="space-y-2">
+                  {(Array.isArray(settings.multiloginFolderIds) ? settings.multiloginFolderIds : []).map((fid, idx) => (
+                    <div key={idx} className="flex gap-2">
+                      <input
+                        type="text"
+                        value={fid}
+                        placeholder={`Folder ID ${idx + 2}`}
+                        onChange={(e) => {
+                          const ids = [...(Array.isArray(settings.multiloginFolderIds) ? settings.multiloginFolderIds : [])];
+                          ids[idx] = e.target.value;
+                          update('multiloginFolderIds', ids);
+                        }}
+                        className="flex-1 bg-gray-800 border border-gray-700 text-gray-200 rounded-xl px-3 py-2 text-sm font-mono"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const ids = [...(Array.isArray(settings.multiloginFolderIds) ? settings.multiloginFolderIds : [])];
+                          ids.splice(idx, 1);
+                          update('multiloginFolderIds', ids);
+                        }}
+                        className="p-2 bg-gray-800 border border-red-700/30 rounded-xl text-red-400 hover:bg-red-900/20"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="bg-gray-800 border border-purple-900/40 rounded-xl p-4">
               <p className="text-xs text-gray-500 mb-2">Automation token (recommended)</p>
@@ -690,8 +740,10 @@ function Section({
         {icon}
         <h2 className="text-white font-semibold">{title}</h2>
       </div>
-      {note && <p className="text-gray-600 text-xs mb-4">{note}</p>}
-      {!note && <div className="mb-4" />}
+      {note
+        ? <p className="text-gray-600 text-xs mb-4">{note}</p>
+        : <div className="mb-4" />
+      }
       {children}
     </div>
   );
@@ -727,13 +779,14 @@ function Field({
 }
 
 function GitPushSection() {
+  const [open, setOpen] = useState(false);
   const [version, setVersion] = useState('');
   const [changelog, setChangelog] = useState('');
   const [pushing, setPushing] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
 
   useEffect(() => {
-    fetch(backendUrl('/api/update/version'))
+    backendFetch('/api/update/version')
       .then((r) => r.json())
       .then((d) => setVersion(d.version || '1.0.0'))
       .catch(() => setVersion('1.0.0'));
@@ -744,7 +797,7 @@ function GitPushSection() {
     setPushing(true);
     setResult(null);
     try {
-      const res = await fetch(backendUrl('/api/update/push'), {
+      const res = await backendFetch('/api/update/push', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ version, changelog: changelog.split('\n').filter((l) => l.trim()) }),
@@ -759,35 +812,49 @@ function GitPushSection() {
   };
 
   return (
-    <div className="bg-gray-900 border border-gray-800 rounded-2xl p-5">
-      <h2 className="text-white font-semibold mb-1">Push Update to GitHub</h2>
-      <p className="text-gray-600 text-xs mb-4">Developer tool — bump version and push changelog</p>
-      <div className="grid grid-cols-2 gap-4 mb-4">
-        <div>
-          <label className="text-gray-400 text-xs block mb-1">Version</label>
-          <input
-            value={version}
-            onChange={(e) => setVersion(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm font-mono text-gray-200"
-          />
-        </div>
-      </div>
-      <textarea
-        value={changelog}
-        onChange={(e) => setChangelog(e.target.value)}
-        rows={3}
-        placeholder="Changelog lines…"
-        className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-200 mb-3 resize-none"
-      />
+    <div className="bg-gray-900 border border-gray-800 rounded-2xl overflow-hidden">
       <button
         type="button"
-        onClick={handlePush}
-        disabled={pushing || !version.trim() || !changelog.trim()}
-        className="bg-green-600 hover:bg-green-500 disabled:opacity-40 text-white px-4 py-2 rounded-xl text-sm font-semibold"
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-5 py-4 text-left hover:bg-gray-800/40 transition-colors"
       >
-        {pushing ? 'Pushing…' : 'Push to GitHub'}
+        <div>
+          <h2 className="text-gray-400 font-medium text-sm">🛠 Developer Tools</h2>
+          <p className="text-gray-600 text-xs mt-0.5">Push update to GitHub — version bump &amp; changelog</p>
+        </div>
+        <span className="text-gray-600 text-xs">{open ? '▲ Hide' : '▼ Show'}</span>
       </button>
-      {result && <p className={`text-xs mt-2 ${result.success ? 'text-green-400' : 'text-red-400'}`}>{result.message}</p>}
+
+      {open && (
+        <div className="px-5 pb-5 border-t border-gray-800">
+          <div className="grid grid-cols-2 gap-4 mb-4 mt-4">
+            <div>
+              <label className="text-gray-400 text-xs block mb-1">Version</label>
+              <input
+                value={version}
+                onChange={(e) => setVersion(e.target.value)}
+                className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm font-mono text-gray-200"
+              />
+            </div>
+          </div>
+          <textarea
+            value={changelog}
+            onChange={(e) => setChangelog(e.target.value)}
+            rows={3}
+            placeholder="Changelog lines…"
+            className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-200 mb-3 resize-none"
+          />
+          <button
+            type="button"
+            onClick={handlePush}
+            disabled={pushing || !version.trim() || !changelog.trim()}
+            className="bg-green-600 hover:bg-green-500 disabled:opacity-40 text-white px-4 py-2 rounded-xl text-sm font-semibold"
+          >
+            {pushing ? 'Pushing…' : 'Push to GitHub'}
+          </button>
+          {result && <p className={`text-xs mt-2 ${result.success ? 'text-green-400' : 'text-red-400'}`}>{result.message}</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -797,9 +864,10 @@ function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: b
     <button
       type="button"
       onClick={() => onChange(!enabled)}
-      className={`relative w-11 h-6 rounded-full ${enabled ? 'bg-red-600' : 'bg-gray-700'}`}
+      aria-pressed={enabled}
+      className={`relative w-11 h-6 rounded-full transition-colors duration-200 ${enabled ? 'bg-green-600' : 'bg-gray-700'}`}
     >
-      <div className={`absolute top-1 w-4 h-4 bg-white rounded-full ${enabled ? 'left-6' : 'left-1'}`} />
+      <div className={`absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all duration-200 ${enabled ? 'left-6' : 'left-1'}`} />
     </button>
   );
 }

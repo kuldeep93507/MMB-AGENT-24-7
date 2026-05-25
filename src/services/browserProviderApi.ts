@@ -4,7 +4,7 @@
  * Calls backend /api/profiles/* endpoints with ?provider= query param
  */
 
-import { backendUrl } from "./backendOrigin";
+import { backendFetch } from "./backendOrigin";
 
 /**
  * Parses backend response; Vite SPA fallback sometimes returns index.html (`<!DOCTYPE...`)
@@ -103,8 +103,8 @@ export async function listProfiles(
   enrichDetails = true,
 ): Promise<StandardResponse<ListProfilesData>> {
   try {
-    const res = await fetch(
-      backendUrl(`/api/profiles/list?provider=${encodeURIComponent(provider)}`),
+    const res = await backendFetch(
+      `/api/profiles/list?provider=${encodeURIComponent(provider)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -129,8 +129,8 @@ export async function createProfile(
   options: CreateProfileOptions
 ): Promise<StandardResponse<{ profileId: string }>> {
   try {
-    const res = await fetch(
-      backendUrl(`/api/profiles/create?provider=${encodeURIComponent(provider)}`),
+    const res = await backendFetch(
+      `/api/profiles/create?provider=${encodeURIComponent(provider)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -155,8 +155,8 @@ export async function startProfile(
   profileId: string
 ): Promise<StandardResponse<StartProfileData>> {
   try {
-    const res = await fetch(
-      backendUrl(`/api/profiles/start?provider=${encodeURIComponent(provider)}`),
+    const res = await backendFetch(
+      `/api/profiles/start?provider=${encodeURIComponent(provider)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -181,8 +181,8 @@ export async function stopProfile(
   profileId: string
 ): Promise<StandardResponse<{ profileId: string }>> {
   try {
-    const res = await fetch(
-      backendUrl(`/api/profiles/stop?provider=${encodeURIComponent(provider)}`),
+    const res = await backendFetch(
+      `/api/profiles/stop?provider=${encodeURIComponent(provider)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -207,8 +207,8 @@ export async function deleteProfile(
   profileId: string
 ): Promise<StandardResponse<{ profileId: string }>> {
   try {
-    const res = await fetch(
-      backendUrl(`/api/profiles/delete?provider=${encodeURIComponent(provider)}`),
+    const res = await backendFetch(
+      `/api/profiles/delete?provider=${encodeURIComponent(provider)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -239,8 +239,8 @@ export async function listProfilesAll(
   enrichDetails = true,
 ): Promise<StandardResponse<ListProfilesData & { errors: { provider: BrowserProvider; message: string }[] }>> {
   try {
-    const res = await fetch(
-      backendUrl(`/api/profiles/list-all`),
+    const res = await backendFetch(
+      `/api/profiles/list-all`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

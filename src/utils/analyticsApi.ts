@@ -1,4 +1,4 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 
 export type AnalyticsTimeFilter = 'today' | 'yesterday' | '7d' | '30d' | 'all';
 
@@ -41,6 +41,9 @@ export interface AnalyticsResponse {
   trafficDirect: number;
   trafficChannel: number;
   trafficBacklink: number;
+  /** When direct/backlink source could not be determined */
+  trafficDirectFallback?: number;
+  trafficBacklinkFallback?: number;
   perProfile: Record<string, ProfileAnalytics>;
   recentActivity?: RecentActivityEntry[];
   dailyTrend?: DailyTrendPoint[];
@@ -86,7 +89,7 @@ export function formatWatchTime(seconds: number): string {
 
 export async function fetchAnalytics(filter: AnalyticsTimeFilter): Promise<AnalyticsResponse | null> {
   try {
-    const res = await fetch(backendUrl(`/api/analytics?filter=${filter}`));
+    const res = await backendFetch(`/api/analytics?filter=${filter}`);
     if (!res.ok) return null;
     return (await res.json()) as AnalyticsResponse;
   } catch {
@@ -96,7 +99,7 @@ export async function fetchAnalytics(filter: AnalyticsTimeFilter): Promise<Analy
 
 export async function resetTodayEngagement(): Promise<boolean> {
   try {
-    const res = await fetch(backendUrl('/api/analytics/reset-today-engagement'), { method: 'POST' });
+    const res = await backendFetch('/api/analytics/reset-today-engagement', { method: 'POST' });
     if (!res.ok) return false;
     const data = await res.json();
     return !!data.success;

@@ -11,6 +11,7 @@
     "server": "node server/index.cjs",
     "watchdog": "node server/watchdog.cjs",
     "test:youtube-ui-smoke": "node server/scripts/youtube-ui-smoke.cjs",
+    "test:full-bot": "node server/scripts/full-bot-smoke-test.cjs",
     "test:traffic-qa": "node server/scripts/e2e-traffic-qa.cjs",
     "test:antidetect": "node server/scripts/audit-antidetect-4.cjs",
     "start": "concurrently \"npm run dev\" \"npm run server\"",
@@ -21,10 +22,11 @@
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",
     "test": "jest --testPathPatterns=server/tests",
-    "test:bugs": "jest --testPathPatterns=server/tests/bug-condition --forceExit"
+    "test:bugs": "jest --config jest.exploratory.config.cjs"
   },
   "dependencies": {
     "clsx": "2.1.1",
+    "dotenv": "^16.5.0",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "lucide-react": "^1.14.0",

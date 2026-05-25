@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
-  Shuffle, Save, RotateCcw, Play, Eye, AlertTriangle, CheckCircle, Search, Download, Upload, Pin, Square,
+  Shuffle, Save, RotateCcw, Play, Eye, AlertTriangle, CheckCircle, Download, Upload, Pin, Square,
   Calendar, Timer, RefreshCw,
 } from 'lucide-react';
 import type { Profile } from '../types';
 import { inferProxyTypeFromProfile } from '../utils/profileAdapter';
 import type { Channel, Video } from '../store/useChannelStore';
 import LiveProgressPanel from './LiveProgressPanel';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import { postActivityLog } from '../utils/logsApi';
 import { profileConfigsForSchedule } from '../utils/profileConfigsForSchedule';
 import { PERMANENT_CHANNEL_IDS } from '../data/defaultChannels';
@@ -125,7 +125,7 @@ async function loadHistoryFromBackend(profileIds: string[]): Promise<{
   await Promise.all(
     profileIds.map(async (profileId) => {
       try {
-        const res = await fetch(backendUrl('/api/watch-history/' + encodeURIComponent(profileId)));
+        const res = await backendFetch('/api/watch-history/' + encodeURIComponent(profileId));
         const data = await res.json();
         if (data.code !== 0 || !Array.isArray(data.data)) return;
         const norms: ServerHistRow[] = [];
@@ -177,6 +177,7 @@ interface ShuffleSettings {
   adSkipEnabled: boolean;
   adSkipAfterSec: number;
   midRollAdWaitSec: number;
+  warmupEnabled: boolean;
 }
 
 const DEFAULT_SHUFFLE_SETTINGS: ShuffleSettings = {
@@ -190,6 +191,7 @@ const DEFAULT_SHUFFLE_SETTINGS: ShuffleSettings = {
   adSkipEnabled: true,
   adSkipAfterSec: 5,
   midRollAdWaitSec: 10,
+  warmupEnabled: true,
 };
 
 function loadShuffleSettings(): ShuffleSettings {
@@ -223,6 +225,7 @@ function normalizeShuffleSettings(parsed: Partial<ShuffleSettings>): ShuffleSett
     adSkipEnabled: merged.adSkipEnabled !== false,
     adSkipAfterSec: Math.max(0, Math.min(120, Number(merged.adSkipAfterSec) || 5)),
     midRollAdWaitSec: Math.max(0, Math.min(120, Number(merged.midRollAdWaitSec) || 10)),
+    warmupEnabled: merged.warmupEnabled !== false,
   };
 }
 
@@ -285,7 +288,7 @@ function buildChannelConfigs(
       const base: ChannelConfig = {
         channelId: ch.id,
         channelName: ch.channel_name,
-        totalVideos: getVideos(ch.id, 'enabled').length,
+        totalVideos: getVideos(ch.id).length,
         minPerProfile: prev?.minPerProfile ?? 2,
         maxPerProfile: prev?.maxPerProfile ?? 4,
       };
@@ -547,7 +550,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
     const profileVideos: AssignedVideo[] = [];
 
     for (const config of channelConfigs) {
-      const allChannelVideos = getVideos(config.channelId, 'enabled');
+      const allChannelVideos = getVideos(config.channelId);
       if (allChannelVideos.length === 0) continue;
 
       const count = Math.floor(Math.random() * (config.maxPerProfile - config.minPerProfile + 1)) + config.minPerProfile;
@@ -600,7 +603,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
     const shared: AssignedVideo[] = [];
 
     for (const config of channelConfigs) {
-      const allChannelVideos = getVideos(config.channelId, 'enabled');
+      const allChannelVideos = getVideos(config.channelId);
       if (allChannelVideos.length === 0) continue;
 
       const manualPick = sameModePicks[config.channelId] ?? sameModePicks[Number(config.channelId) as unknown as number];
@@ -724,7 +727,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
     const profileVideos: AssignedVideo[] = [];
 
     for (const config of channelConfigs) {
-      const allChannelVideos = getVideos(config.channelId, 'enabled');
+      const allChannelVideos = getVideos(config.channelId);
       const count = Math.floor(Math.random() * (config.maxPerProfile - config.minPerProfile + 1)) + config.minPerProfile;
 
       let available = allChannelVideos.filter(v =>
@@ -891,7 +894,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
       return;
     }
 
-    const video = getVideos(channelId, 'enabled').find(v => v.video_id === videoId);
+    const video = getVideos(channelId).find(v => v.video_id === videoId);
     if (!video) return;
     const entry: AssignedVideo = {
       channelId,
@@ -917,6 +920,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
       adSkipEnabled: settings.adSkipEnabled,
       adSkipAfterSec: settings.adSkipAfterSec,
       midRollAdWaitSec: settings.midRollAdWaitSec,
+      warmupEnabled: settings.warmupEnabled,
       humanEngagementEnabled: true,
       seekForwardMax: 2,
       seekForwardSec: 10,
@@ -1019,7 +1023,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
     }
     const scheduleId = 'shuffle_single_' + Date.now();
     try {
-      const res = await fetch(backendUrl('/api/schedule/run'), {
+      const res = await backendFetch('/api/schedule/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1065,7 +1069,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
 
     const scheduleId = 'shuffle_' + Date.now();
     try {
-      const res = await fetch(backendUrl('/api/schedule/run'), {
+      const res = await backendFetch('/api/schedule/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1111,7 +1115,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
         commentText: pickRandomComment(),
       };
 
-      const res = await fetch(backendUrl('/api/schedule/run'), {
+      const res = await backendFetch('/api/schedule/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ schedule: scheduleData }),
@@ -1538,6 +1542,22 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
               </div>
             </div>
             <div className="lg:col-span-2 border-t border-gray-800 pt-4">
+              <label className="text-xs text-gray-400 block mb-2 font-medium text-green-400/90">Warmup Settings</label>
+              <div className="grid sm:grid-cols-2 gap-4 mb-4">
+                <label className="flex items-center gap-2 text-sm text-gray-400">
+                  <input type="checkbox" checked={settings.warmupEnabled}
+                    onChange={e => setSettings(s => ({ ...s, warmupEnabled: e.target.checked }))}
+                    className="rounded border-gray-600" />
+                  Warmup enabled
+                </label>
+                <p className="text-xs text-gray-600 self-center">
+                  {settings.warmupEnabled
+                    ? '✅ Session shuru hone se pehle high-CPM sites browse hoga (har profile ke liye alag)'
+                    : '⏭️ Warmup skip — direct YouTube pe jaayega'}
+                </p>
+              </div>
+            </div>
+            <div className="lg:col-span-2 border-t border-gray-800 pt-4">
               <label className="text-xs text-gray-400 block mb-2 font-medium text-amber-300/90">Ads Settings</label>
               <div className="grid sm:grid-cols-3 gap-4">
                 <label className="flex items-center gap-2 text-sm text-gray-400">
@@ -1566,7 +1586,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
                 <label className="text-xs text-gray-400 block mb-3">Same mode — video select karo (har channel ke liye)</label>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {channelConfigs.map(config => {
-                    const vids = getVideos(config.channelId, 'enabled');
+                    const vids = getVideos(config.channelId);
                     const current = sameModePicks[config.channelId] || 'random';
                     return (
                       <div key={config.channelId} className="bg-gray-800 rounded-xl p-3 border border-gray-700">
@@ -1758,7 +1778,7 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
               {activeChannels.map(ch => {
                 const enabled = enabledIdSet.has(ch.id);
                 const config = channelConfigs.find(c => c.channelId === ch.id);
-                const total = getVideos(ch.id, 'enabled').length;
+                const total = getVideos(ch.id).length;
                 return (
                   <div key={ch.id} className={`bg-gray-800 rounded-xl p-4 border ${enabled ? 'border-purple-700/50' : 'border-gray-700 opacity-60'}`}>
                     <label className="flex items-center gap-2 mb-3 cursor-pointer">

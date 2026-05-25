@@ -2,7 +2,7 @@
  * Multilogin trash API — list / permanent delete / empty trash
  */
 
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import type { StandardProfile, StandardResponse } from '../services/browserProviderApi';
 
 export interface TrashListData {
@@ -31,7 +31,7 @@ export async function listTrashProfiles(
       pageNo: String(pageNo),
       pageSize: String(pageSize),
     });
-    const res = await fetch(backendUrl(`/api/profiles/trash?${q}`));
+    const res = await backendFetch(`/api/profiles/trash?${q}`);
     return readJson<TrashListData>(res);
   } catch (err: unknown) {
     return {
@@ -46,7 +46,7 @@ export async function deleteTrashProfiles(
   profileIds: string[],
 ): Promise<StandardResponse<{ profileIds: string[]; deleted: number }>> {
   try {
-    const res = await fetch(backendUrl('/api/profiles/trash/delete?provider=multilogin'), {
+    const res = await backendFetch('/api/profiles/trash/delete?provider=multilogin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ profileIds }),
@@ -63,9 +63,10 @@ export async function deleteTrashProfiles(
 
 export async function emptyTrash(): Promise<StandardResponse<{ deleted: number; warning?: string }>> {
   try {
-    const res = await fetch(backendUrl('/api/profiles/trash/empty?provider=multilogin'), {
+    const res = await backendFetch('/api/profiles/trash/empty?provider=multilogin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
     });
     return readJson(res);
   } catch (err: unknown) {

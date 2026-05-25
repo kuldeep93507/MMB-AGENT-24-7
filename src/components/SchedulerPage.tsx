@@ -6,7 +6,7 @@ import {
 import type { Profile } from '../types';
 import type { Channel, Video } from '../store/useChannelStore';
 import LiveProgressPanel from './LiveProgressPanel';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import { postActivityLog } from '../utils/logsApi';
 import { profileConfigsForSchedule } from '../utils/profileConfigsForSchedule';
 import { PERMANENT_CHANNEL_IDS } from '../data/defaultChannels';
@@ -50,9 +50,9 @@ interface Schedule {
   profileConfigs?: Record<string, unknown>[];
   lastRunError?: string;
   lastRunMessage?: string;
+  /** Passed to server payload when running a schedule (not persisted on Schedule) */
+  commentText?: string;
 }
-
-type VideoEntry = Schedule['sameForAll'][0]['videos'][0];
 
 interface SchedulerPageProps {
   profiles: Profile[];
@@ -67,30 +67,6 @@ function loadSchedules(): Schedule[] {
 }
 function saveSchedulesLocal(s: Schedule[]) {
   try { localStorage.setItem('mmb_schedules_v2', JSON.stringify(s)); } catch {}
-}
-
-function shuffleArray<T>(arr: T[]): T[] {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function parseYoutubeUrls(text: string): { title: string; url: string }[] {
-  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-  const out: { title: string; url: string }[] = [];
-  for (const line of lines) {
-    const m = line.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
-    if (m) {
-      const url = `https://www.youtube.com/watch?v=${m[1]}`;
-      out.push({ title: line.length > 60 ? line.slice(0, 57) + '…' : line, url });
-    } else if (line.startsWith('http')) {
-      out.push({ title: line, url: line });
-    }
-  }
-  return out;
 }
 
 function enrichScheduleForServer(schedule: Schedule, profiles: Profile[]): Schedule {
@@ -263,7 +239,7 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
         })),
       }, profiles);
 
-      const res = await fetch(backendUrl('/api/schedule/run'), {
+      const res = await backendFetch('/api/schedule/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ schedule: scheduleData }),
@@ -343,7 +319,7 @@ export default function SchedulerPage({ profiles, channels, getVideos }: Schedul
 
   const handleStop = async (id: string) => {
     try {
-      await fetch(backendUrl('/api/schedule/stop'), {
+      await backendFetch('/api/schedule/stop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ scheduleId: id }),
@@ -601,14 +577,26 @@ function ScheduleList({ schedules, profiles, channels, now, concurrency, onCreat
             </button>
           </div>
         ) : (
+          <>
           <div className="space-y-4">
-            {schedules.map(s => (
+            {paged.map(s => (
               <ScheduleCard key={s.id} schedule={s} profiles={profiles} channels={channels} now={now}
                 onEdit={() => onEdit(s.id)} onRun={() => onRun(s.id)} onStop={() => onStop(s.id)}
-                onDelete={() => onDelete(s.id)} onStartCountdown={() => onStartCountdown(s.id)}
+                onDelete={() => onDelete(s.id)} onDuplicate={() => onDuplicate(s.id)}
+                onStartCountdown={() => onStartCountdown(s.id)}
                 onCancelCountdown={() => onCancelCountdown(s.id)} />
             ))}
           </div>
+          {filtered.length > perPage && (
+            <div className="flex justify-center items-center gap-4 pt-4 text-sm">
+              <button type="button" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}
+                className="px-3 py-1.5 rounded-lg bg-gray-800 text-gray-300 disabled:opacity-40 hover:bg-gray-700">Prev</button>
+              <span className="text-gray-500">{page} / {totalPages}</span>
+              <button type="button" disabled={page >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                className="px-3 py-1.5 rounded-lg bg-gray-800 text-gray-300 disabled:opacity-40 hover:bg-gray-700">Next</button>
+            </div>
+          )}
+          </>
         )}
       </div>
     </div>

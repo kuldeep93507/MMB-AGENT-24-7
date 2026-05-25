@@ -47,19 +47,46 @@ export function backendUrl(apiPath: string): string {
   return `${base}${path}`;
 }
 
-const API_TOKEN_KEY = 'mmb_api_token';
+const API_TOKEN_KEY = "mmb_api_token";
 
-/** Auth header for protected server routes (update/push, clear logs, etc.) */
+/** x-api-key (VITE_BACKEND_API_KEY) + optional legacy `X-MMB-Token` from localStorage. */
 export function getAuthHeaders(): Record<string, string> {
+  const h: Record<string, string> = {};
   try {
+    const key =
+      typeof import.meta.env.VITE_BACKEND_API_KEY === "string"
+        ? import.meta.env.VITE_BACKEND_API_KEY.trim()
+        : "";
+    if (key) h["x-api-key"] = key;
     const token = localStorage.getItem(API_TOKEN_KEY);
-    if (token) return { 'X-MMB-Token': token };
-  } catch { /* ignore */ }
-  return {};
+    if (token && token.trim()) h["X-MMB-Token"] = token.trim();
+  } catch (err) {
+    console.warn("[backendOrigin] getAuthHeaders failed:", err instanceof Error ? err.message : err);
+  }
+  return h;
 }
 
 export function storeApiToken(token: string): void {
   try {
     if (token) localStorage.setItem(API_TOKEN_KEY, token);
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
+}
+
+function mergeInitWithAuth(init: RequestInit): RequestInit {
+  const hdrs = new Headers(init.headers as HeadersInit | undefined);
+  const auth = getAuthHeaders();
+  if (typeof init.body === "string" && !hdrs.has("Content-Type")) {
+    hdrs.set("Content-Type", "application/json");
+  }
+  for (const [k, v] of Object.entries(auth)) {
+    if (v != null && String(v).length > 0) hdrs.set(k, String(v));
+  }
+  return { ...init, headers: hdrs };
+}
+
+/** Prefer this over `fetch(backendUrl(...))` — attaches `x-api-key` automatically. */
+export async function backendFetch(apiPath: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(backendUrl(apiPath), mergeInitWithAuth(init));
 }

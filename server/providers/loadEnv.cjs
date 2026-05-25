@@ -1,16 +1,6 @@
 /**
- * loadEnv — Lightweight .env loader (no external dependencies)
- *
- * Loads key=value pairs from a .env file at the project root into process.env
- * without overwriting variables already set in the environment.
- *
- * Why not the dotenv package? To avoid adding a new dependency to package.json
- * for a feature this small. The parser is intentionally minimal but handles:
- *   - Comments (#) and blank lines
- *   - Surrounding single or double quotes
- *   - Whitespace around keys/values
- *
- * Usage: require('./providers/loadEnv.cjs')();
+ * Loads project root `.env` into process.env via the `dotenv` package.
+ * Fallback: lightweight parser does not overwrite values already provided by dotenv/OS.
  */
 
 'use strict';
@@ -20,6 +10,12 @@ const path = require('path');
 
 function loadEnv(envPath) {
   const resolvedPath = envPath || path.resolve(__dirname, '..', '..', '.env');
+
+  try {
+    require('dotenv').config({ path: resolvedPath, override: false });
+  } catch (err) {
+    console.warn('[loadEnv] dotenv failed:', err.message);
+  }
 
   if (!fs.existsSync(resolvedPath)) {
     return { loaded: false, path: resolvedPath, count: 0 };

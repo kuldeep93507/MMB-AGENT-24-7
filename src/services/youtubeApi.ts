@@ -22,6 +22,7 @@ export interface YouTubeChannelData {
   channelName: string;
   channelUrl: string;
   publishedAt: number;
+  subscriberCount: number;
   videos: YouTubeVideo[];
 }
 
@@ -104,49 +105,72 @@ function parseInnerTubeResponse(data: any, inputId: string): YouTubeChannelData 
   const channelUrl  = `https://www.youtube.com/channel/${realChannelId}`;
   const channelId   = realChannelId;
 
+  // Subscriber count — InnerTube returns it in several possible paths
+  const subText: string =
+    header?.subscriberCountText?.simpleText ||
+    header?.subscriberCountText?.runs?.[0]?.text ||
+    metadata?.description?.match(/(\d[\d.,KMB]*)\s+subscriber/i)?.[1] ||
+    '0';
+  const subscriberCount = parseSubscriberCount(subText);
+
   // Find the Videos tab
   const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
   const videosTab = tabs.find((t: any) => t.tabRenderer?.title === 'Videos');
-  
+
   const videos: YouTubeVideo[] = [];
-  
+
   if (videosTab) {
     const contents = videosTab.tabRenderer?.content?.richGridRenderer?.contents || [];
-    
+
     for (const item of contents) {
-      const videoRenderer = item.richItemRenderer?.content?.videoRenderer;
-      if (!videoRenderer) continue;
-      
-      const videoId = videoRenderer.videoId;
-      if (!videoId) continue;
-      
-      const title = videoRenderer.title?.runs?.[0]?.text || '';
-      const viewCountText = videoRenderer.viewCountText?.simpleText || videoRenderer.viewCountText?.runs?.[0]?.text || '0';
-      const views = parseViewCount(viewCountText);
-      
-      // Published time (relative like "2 weeks ago")
-      const publishedText = videoRenderer.publishedTimeText?.simpleText || '';
-      const publishedAt = parseRelativeTime(publishedText);
-      
-      // Duration
-      const duration = videoRenderer.lengthText?.simpleText || '0:00';
-      
-      // Thumbnail
-      const thumbnails = videoRenderer.thumbnail?.thumbnails || [];
-      const thumbnail = thumbnails[thumbnails.length - 1]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
-      
-      videos.push({
-        videoId,
-        title,
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        thumbnail,
-        publishedAt,
-        updatedAt: publishedAt,
-        views,
-        likes: 0,
-        description: '',
-        duration,
-      });
+      const content = item.richItemRenderer?.content;
+      if (!content) continue;
+
+      // ── Format A: old videoRenderer ──────────────────────────────────────
+      if (content.videoRenderer) {
+        const vr = content.videoRenderer;
+        const videoId = vr.videoId;
+        if (!videoId) continue;
+        const title         = vr.title?.runs?.[0]?.text || '';
+        const viewCountText = vr.viewCountText?.simpleText || vr.viewCountText?.runs?.[0]?.text || '0';
+        const views         = parseViewCount(viewCountText);
+        const publishedText = vr.publishedTimeText?.simpleText || '';
+        const publishedAt   = parseRelativeTime(publishedText);
+        const duration      = vr.lengthText?.simpleText || '0:00';
+        const thumbnails    = vr.thumbnail?.thumbnails || [];
+        const thumbnail     = thumbnails[thumbnails.length - 1]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+        videos.push({ videoId, title, url: `https://www.youtube.com/watch?v=${videoId}`, thumbnail, publishedAt, updatedAt: publishedAt, views, likes: 0, description: '', duration });
+        continue;
+      }
+
+      // ── Format B: new lockupViewModel (2024+) ────────────────────────────
+      if (content.lockupViewModel) {
+        const lvm    = content.lockupViewModel;
+        const videoId: string = lvm.contentId || '';
+        if (!videoId) continue;
+
+        const meta   = lvm.metadata?.lockupMetadataViewModel;
+        const title  = meta?.title?.content || '';
+
+        // Views & published time from metadataRows
+        const parts  = meta?.metadata?.contentMetadataViewModel?.metadataRows?.[0]?.metadataParts || [];
+        const viewCountText = parts[0]?.text?.content || '0';
+        const publishedText = parts[1]?.text?.content || '';
+        const views         = parseViewCount(viewCountText);
+        const publishedAt   = parseRelativeTime(publishedText);
+
+        // Duration from thumbnail overlay badge
+        const overlays  = lvm.contentImage?.thumbnailViewModel?.overlays || [];
+        const badge     = overlays[0]?.thumbnailBottomOverlayViewModel?.badges?.[0]?.thumbnailBadgeViewModel;
+        const duration  = badge?.text || '0:00';
+
+        // Thumbnail — take highest-res source
+        const sources   = lvm.contentImage?.thumbnailViewModel?.image?.sources || [];
+        const thumbnail = sources[sources.length - 1]?.url || `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+
+        videos.push({ videoId, title, url: `https://www.youtube.com/watch?v=${videoId}`, thumbnail, publishedAt, updatedAt: publishedAt, views, likes: 0, description: '', duration });
+        continue;
+      }
     }
   }
   
@@ -155,8 +179,23 @@ function parseInnerTubeResponse(data: any, inputId: string): YouTubeChannelData 
     channelName,
     channelUrl,
     publishedAt: Date.now(),
+    subscriberCount,
     videos,
   };
+}
+
+/**
+ * Parse subscriber count from text like "1.2M subscribers", "45.3K", "823"
+ */
+function parseSubscriberCount(text: string): number {
+  if (!text) return 0;
+  const t = text.replace(/,/g, '').replace(/subscribers?/gi, '').trim();
+  const lower = t.toLowerCase();
+  if (/b/i.test(lower)) return Math.round(parseFloat(lower) * 1_000_000_000);
+  if (/m/i.test(lower)) return Math.round(parseFloat(lower) * 1_000_000);
+  if (/k/i.test(lower)) return Math.round(parseFloat(lower) * 1_000);
+  const n = parseInt(t.replace(/\D/g, ''), 10);
+  return isNaN(n) ? 0 : n;
 }
 
 /**
@@ -164,20 +203,26 @@ function parseInnerTubeResponse(data: any, inputId: string): YouTubeChannelData 
  */
 function parseViewCount(text: string): number {
   if (!text) return 0;
-  const cleaned = text.replace(/[, views]/g, '').trim();
-  
-  if (cleaned.endsWith('K')) {
-    return Math.round(parseFloat(cleaned) * 1000);
+
+  let t = text.replace(/,/g, '').trim();
+  t = t.replace(/\s+views\b/gi, '').trim();
+
+  const lower = t.toLowerCase();
+  if (/k\b/i.test(lower)) {
+    const n = parseFloat(lower.replace(/k.*$/i, ''));
+    return Number.isFinite(n) ? Math.round(n * 1000) : 0;
   }
-  if (cleaned.endsWith('M')) {
-    return Math.round(parseFloat(cleaned) * 1000000);
+  if (/m\b/i.test(lower)) {
+    const n = parseFloat(lower.replace(/m.*$/i, ''));
+    return Number.isFinite(n) ? Math.round(n * 1_000_000) : 0;
   }
-  if (cleaned.endsWith('B')) {
-    return Math.round(parseFloat(cleaned) * 1000000000);
+  if (/b\b/i.test(lower)) {
+    const n = parseFloat(lower.replace(/b.*$/i, ''));
+    return Number.isFinite(n) ? Math.round(n * 1_000_000_000) : 0;
   }
-  
-  const num = parseInt(cleaned.replace(/\D/g, ''), 10);
-  return isNaN(num) ? 0 : num;
+
+  const num = Number.parseInt(t.replace(/[^\d.]/g, ''), 10);
+  return Number.isFinite(num) && !Number.isNaN(num) ? num : 0;
 }
 
 /**

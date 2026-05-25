@@ -1,4 +1,4 @@
-import { backendUrl, getAuthHeaders, storeApiToken } from '../services/backendOrigin';
+import { backendFetch, getAuthHeaders, storeApiToken } from '../services/backendOrigin';
 import type { ProviderSelection } from '../services/browserProviderApi';
 
 export type ProxyLifeSetting = '1hr' | '2hr' | '4hr' | '8hr' | '24hr';
@@ -12,6 +12,7 @@ export interface AppSettings {
   multiloginPassword: string;
   multiloginToken: string;
   multiloginFolderId: string;
+  multiloginFolderIds: string[];   // Additional folder IDs (multi-folder support)
   proxyServer: string;
   proxyPort: string;
   proxyPassword: string;
@@ -67,6 +68,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   multiloginPassword: '',
   multiloginToken: '',
   multiloginFolderId: '',
+  multiloginFolderIds: [],
   proxyServer: 'us.smartproxy.net',
   proxyPort: '3120',
   proxyPassword: '',
@@ -137,7 +139,7 @@ export function getProxyConfigFromSettings(): Pick<
 
 export async function fetchSettingsFromServer(): Promise<AppSettings | null> {
   try {
-    const res = await fetch(backendUrl('/api/settings'));
+    const res = await backendFetch('/api/settings');
     if (!res.ok) return null;
     const data = await res.json();
     if (!data.success || !data.settings) return null;
@@ -150,7 +152,7 @@ export async function fetchSettingsFromServer(): Promise<AppSettings | null> {
 
 export async function saveSettingsToServer(settings: AppSettings): Promise<{ success: boolean; error?: string }> {
   try {
-    const res = await fetch(backendUrl('/api/settings'), {
+    const res = await backendFetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(settings),
@@ -168,7 +170,7 @@ export async function testNotification(
   settings: AppSettings,
 ): Promise<{ ok: boolean; message: string }> {
   try {
-    const res = await fetch(backendUrl('/api/notifications/test'), {
+    const res = await backendFetch('/api/notifications/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ type, settings }),
@@ -186,7 +188,7 @@ export async function fetchConcurrency(): Promise<{
   available: number;
 } | null> {
   try {
-    const res = await fetch(backendUrl('/api/concurrency'));
+    const res = await backendFetch('/api/concurrency');
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -196,7 +198,7 @@ export async function fetchConcurrency(): Promise<{
 
 export async function testMoreLoginConnection(settings: Pick<AppSettings, 'moreloginBaseUrl' | 'moreloginApiKey' | 'moreloginSecurityEnabled'>): Promise<{ ok: boolean; message: string }> {
   try {
-    const res = await fetch(backendUrl('/api/settings/test/morelogin'), {
+    const res = await backendFetch('/api/settings/test/morelogin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
@@ -211,7 +213,7 @@ export async function testMultiloginConnection(
   settings?: Pick<AppSettings, 'multiloginEmail' | 'multiloginPassword' | 'multiloginToken' | 'multiloginFolderId'>,
 ): Promise<{ ok: boolean; message: string }> {
   try {
-    const res = await fetch(backendUrl('/api/settings/test/multilogin'), {
+    const res = await backendFetch('/api/settings/test/multilogin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings || {}),

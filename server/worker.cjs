@@ -141,6 +141,7 @@ async function runWorker(data) {
   }
   const agent = new ProfileAgent(profileId, profileName, cdpPort, {
     cdpEndpoint,
+    profileOs: typeof config.profileOs === 'string' ? config.profileOs : '',
     // Forward agent internal logs → main thread → frontend UI
     onLog: (level, message) => sendLog(profileId, level, message),
     onRecoverProfile: async ({ profileId: pid, strategy, profileName: pname }) => {
@@ -242,8 +243,20 @@ async function runWorker(data) {
     } catch (err) {
       sendLog(profileId, 'error', `Video failed: ${err.message}`);
       
-      // If context is dead, restart the browser first then reconnect CDP
-      if (err.message && (err.message.includes('Target closed') || err.message.includes('Session closed') || err.message.includes('Connection closed'))) {
+      // If context is dead, restart the browser first then reconnect CDP.
+      // Playwright can throw several variants depending on what closed:
+      //   "Target closed"  /  "Session closed"  /  "Connection closed"
+      //   "Target page, context or browser has been closed"
+      //   "Page closed"  /  "Browser has been closed"
+      const msgLower = (err.message || '').toLowerCase();
+      const isBrowserDead = msgLower.includes('target closed')
+        || msgLower.includes('session closed')
+        || msgLower.includes('connection closed')
+        || msgLower.includes('page, context or browser has been closed')
+        || msgLower.includes('browser has been closed')
+        || msgLower.includes('page closed')
+        || msgLower.includes('target page');
+      if (isBrowserDead) {
         sendLog(profileId, 'warn', 'Browser connection lost — restarting browser and reconnecting...');
         try {
           // 1. Disconnect Playwright cleanly
@@ -279,6 +292,46 @@ async function runWorker(data) {
           sendLog(profileId, 'error', `Reconnect error: ${reconnectErr.message}`);
           break;
         }
+      }
+    }
+
+    // After a failed watch: check if the browser/context is still alive.
+    // searchAndWatch() catches errors internally and returns false — so the catch
+    // block above never fires for CDP drops that happen INSIDE the agent.
+    // If the browser is dead after a failure, reconnect before the next video.
+    if (!success) {
+      const browserAlive = await agent._pingBrowserAlive().catch(() => false);
+      if (!browserAlive) {
+        sendLog(profileId, 'warn', 'Browser died silently during watch — reconnecting...');
+        let reconnected = false;
+        try {
+          await agent.disconnect().catch(() => {});
+          const restartProvider = providerFactory.getProvider(browserType);
+          await restartProvider.stopProfile(profileId).catch(() => {});
+          await sleep(3000);
+          sendLog(profileId, 'info', 'Restarting browser after silent death...');
+          const restartRes = await restartProvider.startProfile(profileId);
+          if (restartRes.code === 0 && restartRes.data?.cdpPort) {
+            agent.debugPort = restartRes.data.cdpPort;
+            agent.cdpEndpoint = restartRes.data.cdpEndpoint || `http://127.0.0.1:${restartRes.data.cdpPort}`;
+            agent._warmedUp = false;
+            agent._lastPage = null;
+            await sleep(browserType === 'multilogin' ? 6000 : 2000);
+            reconnected = browserType === 'multilogin'
+              ? await agent.connectWithRetry(8, 4000)
+              : await agent.connect();
+            if (reconnected) {
+              sendLog(profileId, 'success', `Browser reconnected on port ${agent.debugPort} — continuing`);
+            } else {
+              sendLog(profileId, 'error', 'Reconnect failed after silent browser death — stopping worker');
+            }
+          } else {
+            sendLog(profileId, 'error', `Browser restart failed: ${restartRes.message || 'No CDP port'} — stopping worker`);
+          }
+        } catch (reconnErr) {
+          sendLog(profileId, 'error', `Reconnect error: ${reconnErr.message}`);
+        }
+        if (!reconnected) break;
       }
     }
 

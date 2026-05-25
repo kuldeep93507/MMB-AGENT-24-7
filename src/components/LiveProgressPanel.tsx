@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Activity, Loader, CheckCircle, XCircle, Clock, Tv, Square, LayoutGrid, Play, RefreshCw } from 'lucide-react';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 import type { Profile } from '../types';
 import {
   fetchRecycleStatus,
@@ -136,7 +136,7 @@ export default function LiveProgressPanel({
   useEffect(() => {
     const fetchWorkers = async () => {
       try {
-        const res = await fetch(backendUrl('/api/workers'));
+        const res = await backendFetch('/api/workers');
         if (res.ok) {
           const data = await res.json();
           setWorkers(data.workers || []);
@@ -254,13 +254,13 @@ export default function LiveProgressPanel({
 
   const stopWorker = async (profileId: string) => {
     try {
-      await fetch(backendUrl(`/api/workers/stop/${profileId}`), { method: 'POST' });
+      await backendFetch(`/api/workers/stop/${profileId}`, { method: 'POST' });
     } catch {}
   };
 
   const stopAll = async () => {
     try {
-      await fetch(backendUrl('/api/schedule/stop'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+      await backendFetch('/api/schedule/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
     } catch {}
   };
 
@@ -292,7 +292,7 @@ export default function LiveProgressPanel({
       .map(w => w.profileId);
     if (!ids.length) return;
     try {
-      await fetch(backendUrl('/api/manual/batch'), {
+      await backendFetch('/api/manual/batch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ profileIds: ids, command: 'arrangeWindows' }),

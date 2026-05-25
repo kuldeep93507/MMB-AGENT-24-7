@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import type { Profile, Job, LogEntry, OS, TaskType, LogSource } from '../types';
 import { postActivityLog, clearActivityLogs } from '../utils/logsApi';
 import {
-  generateProxyConfig, renewProxySession
+  renewProxySession
 } from '../utils/generators';
 import { profileFromListRow, saveSnapshotFromCreateFull, inferProxyTypeFromProfile, isMultiloginProxyHost, type ProviderListRow } from '../utils/profileAdapter';
 import { hydrateAllAppDataFromServer } from '../utils/appDataApi';
@@ -17,9 +17,7 @@ import {
   type BrowserProvider,
   type ProviderSelection,
 } from '../services/browserProviderApi';
-import { backendUrl, getAuthHeaders } from '../services/backendOrigin';
-
-let jobCounter = 0;
+import { backendFetch, getAuthHeaders } from '../services/backendOrigin';
 
 function genId() {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -42,26 +40,16 @@ function formatProfileName(index: number): string {
   return `Profile_${String(index).padStart(3, '0')}`; // Profile_001, Profile_002, etc.
 }
 
-const TASK_LABELS: Record<TaskType, string> = {
-  watch_video: 'Watching video',
-  like_video: 'Liking video',
-  subscribe: 'Subscribing to channel',
-  comment: 'Posting comment',
-  search: 'Searching YouTube',
-  idle: 'Idle',
-};
-
 const ACTIVE_TAB_KEY = 'mmb_active_tab';
 
 /** Must match Sidebar NAV_ITEMS ids */
 export const VALID_APP_TABS = new Set([
-  'dashboard', 'profiles', 'channels', 'video-shuffle', 'backlinks', 'scheduler',
-  'manual', 'analytics', 'comments', 'jobs', 'logs', 'settings',
+  'dashboard', 'monitor', 'profiles', 'channels', 'video-shuffle', 'backlinks', 'scheduler',
+  'manual', 'analytics', 'comments', 'jobs', 'logs', 'settings', 'engagement', 'gmail-setup',
 ]);
 
 const REMOVED_TAB_REDIRECT: Record<string, string> = {
   'proxy-health': 'dashboard',
-  engagement: 'channels',
   performance: 'channels',
   'orchestrator-log': 'channels',
   'video-manager': 'channels',
@@ -101,7 +89,7 @@ export function useStore() {
         return stored;
       }
     } catch {}
-    return 'multilogin';
+    return 'morelogin';  // default: MoreLogin — safer fallback (Multilogin needs cloud auth)
   });
   const browserProviderRef = useRef<ProviderSelection>(browserProvider);
 
@@ -211,11 +199,11 @@ export function useStore() {
     };
     const poll = async () => {
       try {
-        const res = await fetch(backendUrl('/api/workers'));
+        const res = await backendFetch('/api/workers');
         if (!res.ok) return;
         const data = await res.json();
         const workers = Array.isArray(data.workers) ? data.workers : [];
-        setJobs(workers.map((w: Record<string, unknown>) => ({
+        const workerJobs: Job[] = workers.map((w: Record<string, unknown>) => ({
           id: String(w.profileId),
           profileId: String(w.profileId),
           profileName: String(w.profileName || w.profileId),
@@ -230,7 +218,25 @@ export function useStore() {
             : w.progress
               ? `Progress ${w.progress}`
               : undefined,
-        })));
+        }));
+
+        const queuedRaw = Array.isArray(data.queuedJobs) ? data.queuedJobs : [];
+        const queuedMapped: Job[] = queuedRaw.map((q: Record<string, unknown>) => ({
+          id: String(q.id || q.profileId || genId()),
+          profileId: String(q.profileId || ''),
+          profileName: String(q.profileName || q.profileId || 'Profile'),
+          taskType: (String(q.taskType || 'watch_video') as TaskType),
+          status: 'pending',
+          retryCount: Number(q.retryCount) || 0,
+          createdAt: Number(q.createdAt) || Date.now(),
+          startedAt: undefined,
+          completedAt: undefined,
+          details: q.details ? String(q.details) : undefined,
+        }));
+
+        const activeProfiles = new Set(workerJobs.map((j) => j.profileId));
+        const pendingExtras = queuedMapped.filter((j) => j.profileId && !activeProfiles.has(j.profileId));
+        setJobs([...pendingExtras, ...workerJobs]);
       } catch { /* offline */ }
     };
     poll();
@@ -297,7 +303,7 @@ export function useStore() {
           body.androidDevice = androidDevice;
         }
 
-        const res = await fetch(backendUrl('/api/profiles/create-full'), {
+        const res = await backendFetch('/api/profiles/create-full', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
@@ -495,7 +501,7 @@ export function useStore() {
 
     try {
       const proxyTypeForRecreate = inferProxyTypeFromProfile(profile);
-      const res = await fetch(backendUrl('/api/profiles/recreate'), {
+      const res = await backendFetch('/api/profiles/recreate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -595,7 +601,7 @@ export function useStore() {
 
   const retryJob = useCallback(async (jobId: string) => {
     try {
-      await fetch(backendUrl(`/api/workers/stop/${jobId}`), { method: 'POST', headers: getAuthHeaders() });
+      await backendFetch(`/api/workers/stop/${jobId}`, { method: 'POST', headers: getAuthHeaders() });
       addLog('info', `Worker stopped for retry — re-run schedule for profile ${jobId.slice(-4)}`);
     } catch (err) {
       addLog('warn', `Could not stop worker: ${err instanceof Error ? err.message : String(err)}`);
@@ -623,7 +629,7 @@ export function useStore() {
 
     try {
       const provider = resolveProviderFor(profile);
-      const res = await fetch(backendUrl('/api/proxy/rotate'), {
+      const res = await backendFetch('/api/proxy/rotate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -678,6 +684,5 @@ export function useStore() {
   };
 }
 
-function randomDelay(min: number, max: number) {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
-}
+
+

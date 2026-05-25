@@ -112,7 +112,8 @@ export function finalizeScheduleStatus(
   }
   return {
     ...schedule,
-    runMode: schedule.runMode === 'countdown' || schedule.runMode === 'scheduled' ? schedule.runMode : 'manual',
+    // After countdown branch, `runMode === 'countdown'` is already ruled out.
+    runMode: schedule.runMode === 'scheduled' ? 'scheduled' : 'manual',
     status: 'idle',
     startedAt: null,
   };

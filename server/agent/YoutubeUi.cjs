@@ -298,37 +298,77 @@ async function setVideoQuality(page, quality, logFn = () => {}) {
 async function disableAutoplay(page, logFn = () => {}) {
   let ok = false;
   try {
-    await sleep(1500);
+    // FIX: Hover the player first so controls become visible (autoplay toggle is hidden otherwise)
+    await page.evaluate(() => {
+      const player = document.querySelector('#movie_player, .html5-video-player');
+      if (player) {
+        const rect = player.getBoundingClientRect();
+        if (rect.width > 0) {
+          player.dispatchEvent(new MouseEvent('mousemove', {
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height * 0.8, // near bottom controls bar
+            bubbles: true,
+          }));
+        }
+      }
+    }).catch(() => {});
+    await sleep(900); // wait for controls to appear
+
     const mobile = await isMobileYouTube(page);
 
+    // FIX: clickIfOn now also handles case where aria attributes might not be set but button IS visible
+    // Also tries clicking even when status is ambiguous (not pressed/checked), since default state might vary
     const clickIfOn = async (selector) => {
       const el = await page.$(selector);
       if (!el) return false;
-      const isOn = await el.evaluate((node) => {
-        return node.getAttribute('aria-pressed') === 'true'
-          || node.getAttribute('aria-checked') === 'true'
-          || node.classList.contains('ytp-autonav-toggle-button--active');
-      }).catch(() => false);
-      if (isOn) {
+      const state = await el.evaluate((node) => {
+        const pressed = node.getAttribute('aria-pressed');
+        const checked = node.getAttribute('aria-checked');
+        const hasActiveClass = node.classList.contains('ytp-autonav-toggle-button--active')
+          || node.classList.contains('on')
+          || (node.getAttribute('data-tooltip-text') || '').toLowerCase().includes('on');
+        // visible means it exists in DOM and not hidden
+        const visible = node.offsetParent !== null
+          || window.getComputedStyle(node).display !== 'none';
+        return { pressed, checked, hasActiveClass, visible };
+      }).catch(() => null);
+      if (!state || !state.visible) return false;
+      const isOn = state.pressed === 'true' || state.checked === 'true' || state.hasActiveClass;
+      // If state is ambiguous (null/undefined), still try to click once
+      if (isOn || (state.pressed === null && state.checked === null)) {
+        await el.dispatchEvent('click').catch(() => {});
         await el.click({ force: true }).catch(() => {});
-        await sleep(500);
+        await sleep(400);
         return true;
       }
       return false;
     };
 
     if (await clickIfOn('button[data-tooltip-target-id="autoplay-toggle-button"]')) ok = true;
-    else if (await clickIfOn('.ytp-autonav-toggle-button[aria-checked="true"]')) ok = true;
-    else if (await clickIfOn('button[aria-label*="Autoplay" i], button[aria-label*="autoplay" i]')) ok = true;
+    else if (await clickIfOn('.ytp-autonav-toggle-button')) ok = true;
+    else if (await clickIfOn('button[aria-label*="Autoplay" i]')) ok = true;
+    else if (await clickIfOn('button[aria-label*="autoplay" i]')) ok = true;
 
     if (mobile) {
       const mob = await page.evaluate(() => {
-        const btn = document.querySelector(
-          'button[aria-label*="Autoplay" i], ytm-toggle-button-renderer button, [class*="autonav"]',
-        );
-        if (btn) {
-          const on = btn.getAttribute('aria-pressed') === 'true' || btn.getAttribute('aria-checked') === 'true';
-          if (on) { btn.click(); return true; }
+        const selectors = [
+          'button[aria-label*="Autoplay" i]',
+          'button[aria-label*="autoplay" i]',
+          'ytm-toggle-button-renderer button',
+          '[class*="autonav"]',
+        ];
+        for (const sel of selectors) {
+          const btn = document.querySelector(sel);
+          if (!btn || btn.offsetParent === null) continue;
+          const on = btn.getAttribute('aria-pressed') === 'true'
+            || btn.getAttribute('aria-checked') === 'true';
+          if (on) {
+            btn.click();
+            btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            return true;
+          }
+          // ambiguous state — try click anyway
+          btn.click();
           return true;
         }
         return false;
@@ -336,26 +376,35 @@ async function disableAutoplay(page, logFn = () => {}) {
       if (mob) ok = true;
     }
 
+    // Always write localStorage to be sure — this persists across navigations
     await page.evaluate(() => {
       try {
+        // Primary YouTube player pref key
+        localStorage.setItem('yt-player-autoplay', JSON.stringify({ autoplay: false }));
+        // Also update existing prefs objects if present
         const keys = ['yt-player-autoplay', 'yt-player-bandwidth'];
         for (const k of keys) {
-          const raw = localStorage.getItem(k);
-          if (!raw) continue;
-          const prefs = JSON.parse(raw);
-          if (prefs && typeof prefs === 'object') {
-            prefs.autoplay = false;
-            localStorage.setItem(k, JSON.stringify(prefs));
-          }
+          try {
+            const raw = localStorage.getItem(k);
+            if (!raw) continue;
+            const prefs = JSON.parse(raw);
+            if (prefs && typeof prefs === 'object') {
+              prefs.autoplay = false;
+              localStorage.setItem(k, JSON.stringify(prefs));
+            }
+          } catch { /* ignore */ }
         }
+        // Some YouTube versions store it differently
         try {
-          localStorage.setItem('yt-player-autoplay', JSON.stringify({ autoplay: false }));
+          const cfg = JSON.parse(localStorage.getItem('yt-player-preferences') || '{}');
+          cfg.autoplay = false;
+          localStorage.setItem('yt-player-preferences', JSON.stringify(cfg));
         } catch { /* ignore */ }
       } catch { /* ignore */ }
-    });
+    }).catch(() => {});
     ok = true;
 
-    logFn(ok ? 'success' : 'warn', `[Autoplay] ${ok ? 'OFF' : 'could not confirm OFF'}`);
+    logFn(ok ? 'success' : 'warn', `[Autoplay] ${ok ? 'OFF (localStorage + toggle)' : 'could not confirm OFF'}`);
     return ok;
   } catch (err) {
     logFn('warn', `[Autoplay] Error: ${err.message}`);
@@ -363,33 +412,43 @@ async function disableAutoplay(page, logFn = () => {}) {
   }
 }
 
+/** FIX: Returns null when button not found (unknown state), true when confirmed off, false when confirmed on */
 async function verifyAutoplayOff(page) {
-  return page.evaluate(() => {
+  const result = await page.evaluate(() => {
     const btn = document.querySelector(
       'button[data-tooltip-target-id="autoplay-toggle-button"], .ytp-autonav-toggle-button, button[aria-label*="Autoplay" i], button[aria-label*="autoplay" i]',
     );
-    if (!btn) return true;
+    // FIX: Don't claim "off" just because button wasn't found — return null (unknown)
+    if (!btn || btn.offsetParent === null) return null;
     const on = btn.getAttribute('aria-pressed') === 'true'
       || btn.getAttribute('aria-checked') === 'true'
       || btn.classList.contains('ytp-autonav-toggle-button--active');
-    return !on;
-  }).catch(() => true);
+    return !on; // true = off, false = still on
+  }).catch(() => null);
+  return result;
 }
 
 async function ensureAutoplayOff(page, logFn = () => {}) {
   for (let pass = 1; pass <= 3; pass++) {
     await disableAutoplay(page, logFn);
-    const off = await verifyAutoplayOff(page);
-    if (off) {
+    const state = await verifyAutoplayOff(page);
+
+    if (state === true) {
       logFn('success', `[Autoplay] Verified OFF (pass ${pass}/3): OK`);
       return true;
     }
+    if (state === null) {
+      // Button not visible/found — localStorage was set, treat as OK
+      logFn('info', '[Autoplay] Toggle button not in DOM — localStorage set to OFF (OK)');
+      return true;
+    }
+    // state === false: button found and still ON
     if (pass < 3) {
-      logFn('warn', `[Autoplay] Still ON after pass ${pass} — retrying...`);
-      await sleep(randomDelay(600, 1200));
+      logFn('warn', `[Autoplay] Still ON after pass ${pass} — retrying in ${pass * 600}ms...`);
+      await sleep(pass * 600);
     }
   }
-  logFn('warn', '[Autoplay] Could not confirm OFF after 3 passes');
+  logFn('warn', '[Autoplay] Could not confirm OFF after 3 passes — continuing anyway');
   return false;
 }
 
@@ -434,13 +493,28 @@ async function expandDescriptionAndRead(page, logFn = () => {}) {
     await smoothScroll(page, randomDelay(120, 280), 'down');
     await sleep(randomDelay(800, 1600));
     const expanded = await page.evaluate(() => {
+      // Mobile selectors (ytm-) first, then desktop
+      const mobileSelectors = [
+        'ytm-text-inline-expander .expand-button',
+        'ytm-expander .expand-collapse-button',
+        'ytm-section-list-renderer [aria-label*="more" i]',
+        '[id*="expand-content"] button',
+        'ytm-watch-description-hero-renderer button',
+        'button[aria-label*="Show more" i]',
+        'button[aria-label*="more" i]',
+      ];
+      for (const sel of mobileSelectors) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) { el.click(); return true; }
+      }
+      // Desktop selectors
       const btn = document.querySelector(
-        '#expand, tp-yt-paper-button#expand, ytd-text-inline-expander #expand, button[aria-label*="more" i]',
+        '#expand, tp-yt-paper-button#expand, ytd-text-inline-expander #expand',
       );
       if (btn) { btn.click(); return true; }
-      const more = [...document.querySelectorAll('button, yt-formatted-string')].find(el => {
-        const t = (el.textContent || '').toLowerCase();
-        return t === '...more' || t === 'show more' || t.includes('show more');
+      const more = [...document.querySelectorAll('button, yt-formatted-string, span')].find(el => {
+        const t = (el.textContent || '').toLowerCase().trim();
+        return t === '...more' || t === 'show more' || t === 'more';
       });
       if (more) { more.click(); return true; }
       return false;
@@ -464,9 +538,66 @@ async function expandDescriptionAndRead(page, logFn = () => {}) {
   }
 }
 
+/**
+ * Click the bell notification icon after subscribing.
+ * Works on both desktop (www.youtube.com) and Android mobile (m.youtube.com).
+ */
+async function clickBellIcon(page, logFn = () => {}) {
+  try {
+    await sleep(randomDelay(800, 1800));
+    const clicked = await page.evaluate(() => {
+      // Mobile selectors (ytm-)
+      const mobileSelectors = [
+        'ytm-subscription-notification-toggle-button-renderer button',
+        'button[aria-label*="notification" i]',
+        'button[aria-label*="All notifications" i]',
+        '.notification-preference-button button',
+        '[data-style="NOTIFICATION_PREFERENCE_STYLE_UNKNOWN"] button',
+      ];
+      for (const sel of mobileSelectors) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) { el.click(); return 'mobile'; }
+      }
+      // Desktop selectors
+      const desktopSelectors = [
+        '#notification-preference-button button',
+        'ytd-subscription-notification-toggle-button-renderer button',
+        'button[aria-label*="notification" i]',
+        'button[aria-label*="Notification" i]',
+      ];
+      for (const sel of desktopSelectors) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) { el.click(); return 'desktop'; }
+      }
+      return null;
+    });
+    if (clicked) {
+      logFn('info', `🔔 Bell icon clicked (${clicked})`);
+      await sleep(randomDelay(500, 1200));
+      // If a popup appeared (notification options), pick "All" or dismiss
+      await page.evaluate(() => {
+        const allBtn = [...document.querySelectorAll('button, [role="menuitem"], tp-yt-paper-item')]
+          .find(el => {
+            const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
+            return t.includes('all') && (t.includes('notif') || el.closest('[id*="notification"]'));
+          });
+        if (allBtn) allBtn.click();
+      }).catch(() => {});
+      return true;
+    }
+    return false;
+  } catch (err) {
+    logFn('warn', `[Bell] Click failed: ${err.message}`);
+    return false;
+  }
+}
+
 async function hoverRelatedVideos(page, logFn = () => {}) {
   try {
-    const items = await page.$$('ytd-compact-video-renderer, ytd-video-renderer, ytd-rich-item-renderer');
+    // Mobile selectors (ytm-) + desktop selectors
+    const items = await page.$$(
+      'ytm-compact-video-renderer, ytm-video-with-context-renderer, ytd-compact-video-renderer, ytd-video-renderer, ytd-rich-item-renderer',
+    );
     const pick = items.slice(0, Math.min(items.length, 12));
     if (!pick.length) return;
     const count = randomDelay(1, 3);
@@ -492,15 +623,47 @@ async function hoverRelatedVideos(page, logFn = () => {}) {
 
 async function verifyVideoQuality(page, quality) {
   if (!quality || quality === 'auto') return true;
-  const targetRes = String(quality).replace('p', '');
-  return page.evaluate((res) => {
-    const v = document.querySelector('video');
-    if (v && v.videoHeight >= parseInt(res, 10) * 0.85) return true;
-    const gear = document.querySelector('.ytp-settings-button');
-    const qualityBtn = document.querySelector('.ytp-quality-button .ytp-menuitem-label');
-    const label = (qualityBtn?.textContent || gear?.getAttribute('aria-label') || '').toLowerCase();
-    return label.includes(res) && label.includes('p');
-  }, targetRes).catch(() => false);
+  const targetRes = String(quality).replace(/p$/i, '');
+  const minPx = parseInt(targetRes, 10);
+  const threshold = Number.isFinite(minPx) ? minPx : 360;
+
+  const readState = () =>
+    page
+      .evaluate((floor) => {
+        const els = [...document.querySelectorAll('video')];
+        let bestH = 0;
+        for (const v of els) {
+          try {
+            const h = typeof v.videoHeight === 'number' ? v.videoHeight : 0;
+            if (h > bestH) bestH = h;
+          } catch {
+            /* ignore */
+          }
+          try {
+            const q = typeof v.getVideoPlaybackQuality === 'function' ? v.getVideoPlaybackQuality() : null;
+            if (q && typeof q.size === 'object' && typeof q.size.height === 'number') {
+              const qh = q.size.height;
+              if (qh > bestH) bestH = qh;
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        if (bestH >= Math.floor(floor * 0.85)) return true;
+        const gear = document.querySelector('.ytp-settings-button');
+        const qualityBtn = document.querySelector('.ytp-quality-button .ytp-menuitem-label');
+        const label = (qualityBtn?.textContent || gear?.getAttribute('aria-label') || '').toLowerCase();
+        const f = String(floor);
+        return label.includes(f) || label.includes(`${floor}p`);
+      }, threshold)
+      .catch(() => false);
+
+  for (let i = 1; i <= 3; i++) {
+    const ok = await readState();
+    if (ok) return true;
+    if (i < 3) await sleep(randomDelay(800, 2600));
+  }
+  return false;
 }
 
 async function ensureVideoQuality(page, quality, logFn = () => {}) {
@@ -533,6 +696,7 @@ module.exports = {
   ensureAutoplayOff,
   dismissYouTubePopups,
   expandDescriptionAndRead,
+  clickBellIcon,
   hoverRelatedVideos,
   verifyVideoQuality,
   ensureVideoQuality,

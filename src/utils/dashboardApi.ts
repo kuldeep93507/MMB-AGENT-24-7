@@ -1,4 +1,4 @@
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 
 export interface BackendHealth {
   status: string;
@@ -9,7 +9,7 @@ export interface BackendHealth {
 
 export async function fetchBackendHealth(): Promise<BackendHealth | null> {
   try {
-    const res = await fetch(backendUrl('/api/health'));
+    const res = await backendFetch('/api/health');
     if (!res.ok) return null;
     return await res.json();
   } catch {

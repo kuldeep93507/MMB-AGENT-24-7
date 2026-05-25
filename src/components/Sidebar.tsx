@@ -1,13 +1,15 @@
 import {
-  LayoutDashboard, Users, Settings, FileText, Cpu, Server, Tv, Calendar, Gamepad2, BarChart3, MessageSquare, Shuffle, Link, PanelLeftClose, PanelLeftOpen
+  LayoutDashboard, Users, Settings, FileText, Cpu, Server, Tv, Calendar, Gamepad2, BarChart3, MessageSquare, Shuffle, Link, PanelLeftClose, PanelLeftOpen, MonitorPlay, Zap, Mail,
 } from 'lucide-react';
 import { useState, useEffect } from 'react';
-import { backendUrl } from '../services/backendOrigin';
+import { backendFetch } from '../services/backendOrigin';
 
 const NAV_ITEMS = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'monitor', label: 'Live Monitor', icon: MonitorPlay },
   { id: 'profiles', label: 'Profiles', icon: Users },
   { id: 'channels', label: 'Channels', icon: Tv },
+  { id: 'engagement', label: 'Engagement', icon: Zap },
   { id: 'video-shuffle', label: 'Video Shuffle', icon: Shuffle },
   { id: 'backlinks', label: 'Backlinks', icon: Link },
   { id: 'scheduler', label: 'Scheduler', icon: Calendar },
@@ -15,6 +17,7 @@ const NAV_ITEMS = [
   { id: 'analytics', label: 'Analytics', icon: BarChart3 },
   { id: 'comments', label: 'Comments', icon: MessageSquare },
   { id: 'jobs', label: 'Job Queue', icon: Cpu },
+  { id: 'gmail-setup', label: 'Gmail Setup', icon: Mail },
   { id: 'logs', label: 'Activity Logs', icon: FileText },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
@@ -36,7 +39,7 @@ export default function Sidebar({ activeTab, setActiveTab, runningCount, pending
     const check = async () => {
       // Check backend
       try {
-        const res = await fetch(backendUrl('/api/health'), { signal: AbortSignal.timeout(3000) });
+        const res = await backendFetch('/api/health', { signal: AbortSignal.timeout(3000) });
         setBackendStatus(res.ok ? 'running' : 'down');
       } catch {
         setBackendStatus('down');
@@ -45,7 +48,7 @@ export default function Sidebar({ activeTab, setActiveTab, runningCount, pending
       // api.multilogin.com can be down but launcher can still work
       try {
         const provider = (import.meta.env.VITE_BROWSER_PROVIDER || 'multilogin').toLowerCase();
-        const res = await fetch(backendUrl(`/api/providers/ping?provider=${provider}`), {
+        const res = await backendFetch(`/api/providers/ping?provider=${provider}`, {
           signal: AbortSignal.timeout(8000),
         });
         const data = await res.json();
@@ -100,6 +103,11 @@ export default function Sidebar({ activeTab, setActiveTab, runningCount, pending
           >
             <Icon size={16} className={`flex-shrink-0 ${activeTab === id ? 'text-red-400' : 'text-gray-500 group-hover:text-gray-300'}`} />
             {!collapsed && <span>{label}</span>}
+            {!collapsed && id === 'monitor' && runningCount > 0 && (
+              <span className="ml-auto text-xs bg-green-600/30 text-green-400 border border-green-600/30 px-1.5 py-0.5 rounded-full animate-pulse">
+                {runningCount}
+              </span>
+            )}
             {!collapsed && id === 'profiles' && runningCount > 0 && (
               <span className="ml-auto text-xs bg-green-600/30 text-green-400 border border-green-600/30 px-1.5 py-0.5 rounded-full">
                 {runningCount}
@@ -136,12 +144,8 @@ export default function Sidebar({ activeTab, setActiveTab, runningCount, pending
             <div className="flex items-center gap-2">
               <div className={`w-1.5 h-1.5 rounded-full ${multiloginStatus === 'connected' ? 'bg-green-500 animate-pulse' : multiloginStatus === 'checking' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
               <span className="text-gray-400 text-xs">
-                Multilogin: {multiloginStatus === 'connected' ? 'Connected' : multiloginStatus === 'checking' ? 'Checking...' : 'Disconnected'}
+                Browser: {multiloginStatus === 'connected' ? 'Connected' : multiloginStatus === 'checking' ? 'Checking...' : 'Disconnected'}
               </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
-              <span className="text-gray-400 text-xs">Smartproxy: Active</span>
             </div>
             <div className="flex items-center gap-2">
               <div className={`w-1.5 h-1.5 rounded-full ${backendStatus === 'running' ? 'bg-blue-500 animate-pulse' : backendStatus === 'checking' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} />
@@ -153,8 +157,7 @@ export default function Sidebar({ activeTab, setActiveTab, runningCount, pending
         </div>
       ) : (
         <div className="px-2 py-3 border-t border-gray-800 flex flex-col items-center gap-1.5">
-          <div className={`w-2 h-2 rounded-full ${multiloginStatus === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`} title={`Multilogin: ${multiloginStatus}`} />
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Smartproxy Active" />
+          <div className={`w-2 h-2 rounded-full ${multiloginStatus === 'connected' ? 'bg-green-500 animate-pulse' : multiloginStatus === 'checking' ? 'bg-yellow-500 animate-pulse' : 'bg-red-500'}`} title={`Browser: ${multiloginStatus}`} />
           <div className={`w-2 h-2 rounded-full ${backendStatus === 'running' ? 'bg-blue-500 animate-pulse' : 'bg-red-500'}`} title={`Backend: ${backendStatus}`} />
         </div>
       )}

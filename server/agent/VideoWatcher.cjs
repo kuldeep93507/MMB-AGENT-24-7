@@ -35,9 +35,24 @@ async function detectYouTubeAd(page) {
       && window.getComputedStyle(skipBtn).display !== 'none');
 
     const player = document.querySelector('#movie_player, .html5-video-player');
-    if (player?.classList.contains('ad-showing') || player?.classList.contains('ad-interrupting')) {
+    const video = document.querySelector('video');
+
+    // ── PRIORITY 1: Main video already playing properly ──────────────────────
+    // Check this FIRST — if the main video is running, any leftover ad UI
+    // (skip button, overlay) is a stale false-positive and must be ignored.
+    // Use ad-showing class absence + currentTime > 5s as the primary signal.
+    const adShowingOnPlayer = player?.classList.contains('ad-showing')
+      || player?.classList.contains('ad-interrupting');
+    if (!adShowingOnPlayer && video && video.currentTime > 5 && video.duration > 0) {
+      return { hasAd: false, skipVisible: false };
+    }
+
+    // ── PRIORITY 2: Player explicitly in ad-showing state ────────────────────
+    if (adShowingOnPlayer) {
       return { hasAd: true, skipVisible };
     }
+
+    // ── PRIORITY 3: Ad overlay visible ───────────────────────────────────────
     const overlay = document.querySelector('.ytp-ad-player-overlay');
     if (overlay) {
       const rect = overlay.getBoundingClientRect();
@@ -45,16 +60,19 @@ async function detectYouTubeAd(page) {
         return { hasAd: true, skipVisible };
       }
     }
-    if (skipVisible) return { hasAd: true, skipVisible: true };
-    const video = document.querySelector('video');
-    // Main video already playing (long duration) — stale ad UI, not a real ad
-    if (video && video.duration > 90 && video.currentTime > 2) {
-      return { hasAd: false, skipVisible: false };
+
+    // ── PRIORITY 4: Skip button visible (only if video hasn't started yet) ───
+    // Avoid false-positives when the main video is buffering at t=0
+    if (skipVisible && (!video || video.currentTime <= 2)) {
+      return { hasAd: true, skipVisible: true };
     }
+
+    // ── PRIORITY 5: Ad text element present on short-duration video ──────────
     const adText = document.querySelector('.ytp-ad-text, .ytp-ad-preview-text');
     if (adText && video && video.duration > 0 && video.duration <= 70) {
       return { hasAd: true, skipVisible };
     }
+
     return { hasAd: false, skipVisible: false };
   }).catch(() => ({ hasAd: false, skipVisible: false }));
 }
@@ -116,10 +134,21 @@ async function ensureYouTubeAdSkipper(page, config = {}) {
       return { action: 'pending' };
     };
 
+    if (window.__mmbAdSkipInterval) clearInterval(window.__mmbAdSkipInterval);
+    window.__mmbAdSkipInterval = null;
+
     window.__mmbTrySkipAd = trySkip;
-    setInterval(trySkip, 400);
+    window.__mmbAdSkipInterval = setInterval(trySkip, 400);
+
+    // FIX Bug 3: On YouTube SPA navigation (new video/page), reset flag so skipper
+    // reinstalls fresh — avoids stale interval after pushState navigation
     document.addEventListener('yt-navigate-finish', () => {
       window.__mmbAdSkipStart = null;
+      // Allow re-installation on next ensureYouTubeAdSkipper call
+      window.__mmbAdSkipperInstalled = false;
+      // Restart interval immediately for the new page
+      if (window.__mmbAdSkipInterval) clearInterval(window.__mmbAdSkipInterval);
+      window.__mmbAdSkipInterval = setInterval(trySkip, 400);
       trySkip();
     }, true);
   }, { enabled, minWaitSec }).catch(() => {});
@@ -175,6 +204,7 @@ async function waitForAdsToClear(page, config = {}, logFn = () => {}, maxWaitSec
 
   let adSeen = false;
   let skippedCount = 0;
+  let adFirstSeen = 0; // track when THIS ad first appeared
   const start = Date.now();
 
   while ((Date.now() - start) / 1000 < maxWaitSec) {
@@ -183,28 +213,39 @@ async function waitForAdsToClear(page, config = {}, logFn = () => {}, maxWaitSec
       if (adSeen) logFn('info', `Ads cleared after ${Math.round((Date.now() - start) / 1000)}s`);
       break;
     }
+
+    // Record when this ad first appeared
+    if (!adSeen || adFirstSeen === 0) adFirstSeen = Date.now();
     adSeen = true;
 
+    // Time since THIS ad started (not since function start)
+    const adElapsed = (Date.now() - adFirstSeen) / 1000;
+
     if (adSkipEnabled && adInfo.skipVisible) {
-      const elapsed = (Date.now() - start) / 1000;
-      if (elapsed >= adSkipAfterSec) {
+      // Wait adSkipAfterSec from when the ad appeared, then skip
+      if (adElapsed >= adSkipAfterSec) {
         const attempt = await attemptSkipYouTubeAd(page, config);
         if (attempt.skipped) {
           skippedCount++;
-          logFn('info', `⏭ Ad skipped (${attempt.method || 'auto'})`);
+          logFn('info', `⏭ Ad skipped (${attempt.method || 'auto'}) after ${Math.round(adElapsed)}s`);
           await sleep(randomDelay(600, 1200));
+          adFirstSeen = 0; // reset for next ad
           const after = await detectYouTubeAd(page);
           if (!after.hasAd) break;
+          adFirstSeen = Date.now(); // next ad started
         }
       }
-    } else if (adSkipEnabled) {
+    } else if (adSkipEnabled && adElapsed >= 2) {
+      // Unskippable ad — try seek/speedup after 2s (don't rush immediately)
       const attempt = await attemptSkipYouTubeAd(page, config);
       if (attempt.skipped) {
         skippedCount++;
-        logFn('info', `⏭ Ad bypassed (${attempt.method || 'seek/speed'})`);
+        logFn('info', `⏭ Ad bypassed (${attempt.method || 'seek/speed'}) after ${Math.round(adElapsed)}s`);
         await sleep(randomDelay(600, 1200));
+        adFirstSeen = 0;
         const after = await detectYouTubeAd(page);
         if (!after.hasAd) break;
+        adFirstSeen = Date.now();
       }
     }
 
@@ -293,8 +334,11 @@ const videoWatcherPrototype = {
     let adsCount = 0;
     let adsSkipped = 0;
 
-    for (let attempt = 0; attempt < 10; attempt++) {
-      try {
+    const maxPasses = Number.isFinite(config.maxAdsTimeoutSec)
+      ? Math.max(20, Math.min(200, Math.round(Number(config.maxAdsTimeoutSec) / 18)))
+      : 40;
+
+    for (let attempt = 0; attempt < maxPasses; attempt++) {      try {
         const adInfo = await detectYouTubeAd(page).then((r) => ({
           hasAd: r.hasAd,
           adDurationSec: 0,
@@ -334,8 +378,9 @@ const videoWatcherPrototype = {
 
         let skipped = false;
         for (let poll = 0; poll < 40; poll++) {
-          const attempt = await attemptSkipYouTubeAd(page, config);
-          if (attempt.skipped) {
+          // FIX Bug 4: renamed inner variable to avoid shadowing outer 'attempt' loop counter
+          const skipResult = await attemptSkipYouTubeAd(page, config);
+          if (skipResult.skipped) {
             skipped = true;
             break;
           }
@@ -411,11 +456,18 @@ const videoWatcherPrototype = {
       smoothScroll,
       humanMouseMove,
       expandDescriptionAndRead,
+      clickBellIcon,
       hoverRelatedVideos,
       humanType,
       seekForwardKeyboard,
+      isMobileYouTube,
       trackEngagement,
     } = bx();
+
+    // Detect mobile/Android once at the start of watchVideo
+    const isMobile = typeof isMobileYouTube === 'function'
+      ? await isMobileYouTube(page).catch(() => false)
+      : false;
 
     await this.handleAds(page, config);
 
@@ -428,6 +480,13 @@ const videoWatcherPrototype = {
     let totalAdTime = 0;
     let adPlaying = false;
     let adStartTime = 0;
+
+    const adsCapSec = Number.isFinite(config.maxAdsTimeoutSec)
+      ? Math.min(7200, Math.max(60, Number(config.maxAdsTimeoutSec)))
+      : 300;
+    /** Wall-clock failsafe — long mid-roll bursts cannot stall automation forever */
+
+    const absoluteDeadline = Date.now() + durationMs + adsCapSec * 1000 + 45000;
 
     try {
       const isPaused = await page.evaluate(() => {
@@ -556,6 +615,13 @@ const videoWatcherPrototype = {
       const phase5End = pers?.phase5End ?? 0.85;
 
       while (true) {
+        if (Date.now() > absoluteDeadline) {
+          const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+          const capSec = Math.round((absoluteDeadline - startTime) / 1000);
+          this.log('warn', `[watchVideo] Stopping — exceeded safe wall-clock limit (elapsed ${elapsedSec}s ≥ cap ~${capSec}s)`);
+          break;
+        }
+
         if (adPlaying) {
           await sl(1000);
           continue;
@@ -637,15 +703,20 @@ const videoWatcherPrototype = {
             const shouldLike = await this._shouldEngage('like', progress, this.currentVideo, config);
             if (shouldLike) {
               try {
-                const likeBtn = await page.$('like-button-view-model button, ytd-toggle-button-renderer#top-level-buttons-computed button:first-child, button[aria-label*="like"]');
+                const likeSel = isMobile
+                  ? 'ytm-like-button-renderer button[aria-label*="like" i]:not([aria-label*="dislike" i]), button[aria-label*="like" i]:not([aria-label*="dislike" i])'
+                  : 'like-button-view-model button, ytd-toggle-button-renderer#top-level-buttons-computed button:first-child, button[aria-label*="like" i]:not([aria-label*="dislike" i])';
+                const likeBtn = await page.$(likeSel);
                 if (likeBtn) {
-                  const isLiked = await likeBtn.evaluate(el => el.getAttribute('aria-pressed') === 'true');
+                  const isLiked = await likeBtn.evaluate(el =>
+                    el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-label')?.toLowerCase().includes('unlike'),
+                  ).catch(() => false);
                   if (!isLiked) {
                     await humanMouseMove(page);
                     await sl(rd(500, 1500));
                     await likeBtn.click();
                     this._likedThisVideo = true;
-                    this.log('info', '👍 Liked at ~50%');
+                    this.log('info', `👍 Liked at ~50% (${isMobile ? 'mobile' : 'desktop'})`);
                     await trackEngagement(this.profileId, 'like').catch(() => {});
                   }
                 }
@@ -664,10 +735,21 @@ const videoWatcherPrototype = {
           ) {
             const sec = config?.seekForwardSec || 10;
             try {
-              await seekForwardKeyboard(page, sec, pers);
+              if (isMobile) {
+                // Mobile: keyboard L doesn't work, use JS currentTime manipulation
+                await page.evaluate((seekSec) => {
+                  const v = document.querySelector('video');
+                  if (v && v.duration > 0 && isFinite(v.duration)) {
+                    v.currentTime = Math.min(v.duration - 5, v.currentTime + seekSec);
+                  }
+                }, sec);
+                this.log('info', `[Human] ⏩ Forward ~${sec}s via JS (mobile) (${seekCount + 1}/${seekMax})`);
+              } else {
+                await seekForwardKeyboard(page, sec, pers);
+                this.log('info', `[Human] ⏩ Forward ~${sec}s via keyboard (${seekCount + 1}/${seekMax})`);
+              }
               this._seekForwardCount = seekCount + 1;
               this._seekedForward = true;
-              this.log('info', `[Human] ⏩ Forward ~${sec}s via keyboard (${this._seekForwardCount}/${seekMax})`);
               await sl(pers ? pers.pickInt(1500, 2800) : rd(1500, 2800));
             } catch (seekErr) {
               this.log('warn', `[Human] Seek forward failed: ${seekErr.message}`);
@@ -681,15 +763,16 @@ const videoWatcherPrototype = {
             && progress < 0.5
           ) {
             try {
-              const dislikeBtn = await page.$(
-                'like-button-view-model button:nth-of-type(2), ytd-toggle-button-renderer#top-level-buttons-computed button:nth-of-type(2), button[aria-label*="dislike"]',
-              );
+              const dislikeSel = isMobile
+                ? 'button[aria-label*="dislike" i]'
+                : 'like-button-view-model button:nth-of-type(2), ytd-toggle-button-renderer#top-level-buttons-computed button:nth-of-type(2), button[aria-label*="dislike" i]';
+              const dislikeBtn = await page.$(dislikeSel);
               if (dislikeBtn) {
                 await humanMouseMove(page);
                 await sl(rd(500, 1200));
                 await dislikeBtn.click();
                 this._dislikedThisVideo = true;
-                this.log('info', '👎 Dislike clicked (QA test)');
+                this.log('info', `👎 Dislike clicked (${isMobile ? 'mobile' : 'desktop'})`);
               }
             } catch {}
           }
@@ -709,16 +792,27 @@ const videoWatcherPrototype = {
             const shouldSub = await this._shouldEngage('subscribe', progress, this.currentVideo, config);
             if (shouldSub) {
               try {
-                const subBtn = await page.$('#subscribe-button button, ytd-subscribe-button-renderer button');
+                const subSel = isMobile
+                  ? 'ytm-subscribe-button-renderer button, .yt-spec-button-shape-next[aria-label*="Subscribe" i], button[aria-label*="Subscribe" i]:not([aria-label*="Unsubscribe" i])'
+                  : '#subscribe-button button, ytd-subscribe-button-renderer button';
+                const subBtn = await page.$(subSel);
                 if (subBtn) {
                   const text = await subBtn.textContent().catch(() => '');
-                  if (text && !text.toLowerCase().includes('subscribed')) {
+                  const label = await subBtn.getAttribute('aria-label').catch(() => '');
+                  const alreadySub = (text && text.toLowerCase().includes('subscribed'))
+                    || (label && label.toLowerCase().includes('unsubscribe'));
+                  if (!alreadySub) {
                     await humanMouseMove(page);
                     await sl(rd(1000, 3000));
                     await subBtn.click();
                     this._subscribedThisSession = true;
-                    this.log('info', '🔔 Subscribed at ~70%');
+                    this.log('info', `🔔 Subscribed at ~70% (${isMobile ? 'mobile' : 'desktop'})`);
                     await trackEngagement(this.profileId, 'subscribe').catch(() => {});
+                    // Bell icon click after subscribe (if enabled)
+                    if (config?.bellEnabled !== false && typeof clickBellIcon === 'function') {
+                      await sl(rd(800, 1500));
+                      await clickBellIcon(page, (l, m) => this.log(l, m));
+                    }
                   }
                 }
               } catch {}
@@ -748,18 +842,45 @@ const videoWatcherPrototype = {
             try {
               await smoothScroll(page, pers ? pers.pickInt(400, 800) : rd(400, 800), 'down', pers);
               await sl(rd(2000, 4000));
-              const commentBox = await page.$('#simplebox-placeholder, #placeholder-area');
-              if (commentBox) {
-                await commentBox.click();
-                await sl(rd(1000, 2000));
-                await humanType(page, config.commentText);
-                await sl(rd(1000, 2000));
-                const submitBtn = await page.$('#submit-button button, tp-yt-paper-button#submit-button');
-                if (submitBtn) await submitBtn.click();
-                this._commentedThisVideo = true;
-                this.log('info', '💬 Comment posted at ~85%');
-                await trackEngagement(this.profileId, 'comment').catch(() => {});
-                await sl(rd(2000, 3000));
+
+              if (isMobile) {
+                // Mobile comment flow — tap the comment box, type, submit
+                const mobileCommentBox = await page.$(
+                  'ytm-comment-simplebox-renderer, .comment-simplebox-content, [aria-label*="comment" i][role="textbox"], ytm-comment-section-renderer input, ytm-comment-section-renderer textarea',
+                );
+                if (mobileCommentBox) {
+                  await mobileCommentBox.click();
+                  await sl(rd(1000, 2000));
+                  // After tap, the full comment input should appear
+                  const mobileInput = await page.$(
+                    'ytm-comment-simplebox-renderer [contenteditable="true"], [id*="comment-input"], textarea[aria-label*="comment" i]',
+                  ).catch(() => null) || mobileCommentBox;
+                  await mobileInput.type(config.commentText, { delay: rd(40, 80) });
+                  await sl(rd(1000, 2000));
+                  const mobileSubmit = await page.$(
+                    'ytm-comment-simplebox-renderer button[aria-label*="Comment" i], ytm-comment-simplebox-renderer button:last-child, [aria-label*="Post comment" i]',
+                  );
+                  if (mobileSubmit) await mobileSubmit.click();
+                  this._commentedThisVideo = true;
+                  this.log('info', '💬 Comment posted at ~85% (mobile)');
+                  await trackEngagement(this.profileId, 'comment').catch(() => {});
+                  await sl(rd(2000, 3000));
+                }
+              } else {
+                // Desktop comment flow
+                const commentBox = await page.$('#simplebox-placeholder, #placeholder-area');
+                if (commentBox) {
+                  await commentBox.click();
+                  await sl(rd(1000, 2000));
+                  await humanType(page, config.commentText);
+                  await sl(rd(1000, 2000));
+                  const submitBtn = await page.$('#submit-button button, tp-yt-paper-button#submit-button');
+                  if (submitBtn) await submitBtn.click();
+                  this._commentedThisVideo = true;
+                  this.log('info', '💬 Comment posted at ~85%');
+                  await trackEngagement(this.profileId, 'comment').catch(() => {});
+                  await sl(rd(2000, 3000));
+                }
               }
               await smoothScroll(page, rd(400, 800), 'up');
             } catch {}
@@ -806,6 +927,23 @@ function peekBehaviorInjectorStatus() {
   };
 }
 
+async function clearYouTubePageAdIntervals(page) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return;
+  await page
+    .evaluate(() => {
+      if (typeof window.__mmbAdSkipInterval === 'number') {
+        clearInterval(window.__mmbAdSkipInterval);
+        window.__mmbAdSkipInterval = null;
+      }
+      window.__mmbAdSkipperInstalled = false;
+      window.__mmbTrySkipAd = null;
+      window.__mmbAdSkipStart = null;
+    })
+    .catch((e) => {
+      console.warn('[VideoWatcher] clearYouTubePageAdIntervals:', e && e.message ? e.message : String(e));
+    });
+}
+
 module.exports = {
   setBehaviorHelpers,
   mixinProfileAgent,
@@ -814,6 +952,7 @@ module.exports = {
   attemptSkipYouTubeAd,
   waitForAdsToClear,
   getVideoPlaybackState,
+  clearYouTubePageAdIntervals,
   /** Diagnostics: verify agent.cjs wired expand/hover + deps into VideoWatcher (scripts/tests only). */
   peekBehaviorInjectorStatus,
 };

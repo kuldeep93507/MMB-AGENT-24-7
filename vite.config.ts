@@ -14,10 +14,27 @@ const __dirname = path.dirname(__filename);
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
   const MORELOGIN_PORT = String(Number.parseInt(env.MORELOGIN_PORT || "40000", 10) || 40000);
-  const MORELOGIN_API_KEY =
-    env.MORELOGIN_API_KEY || "dbc21d41137f29238f4679e71b7986decb0581115e34a84e";
+  const MORELOGIN_API_KEY_RAW = env.MORELOGIN_API_KEY ?? "";
+  const MORELOGIN_API_KEY = String(MORELOGIN_API_KEY_RAW).trim();
+  if (!MORELOGIN_API_KEY) {
+    // Not a fatal error — key can be set via Settings page after server starts.
+    // MoreLogin proxy calls will fail until key is configured, but the app will still load.
+    console.warn("[Vite] MORELOGIN_API_KEY not found in .env — MoreLogin proxy disabled until set in Settings.");
+  }
   const MORELOGIN_BASE = `http://127.0.0.1:${MORELOGIN_PORT}`;
   const BACKEND_PORT = String(Number.parseInt(env.BACKEND_PORT || "3100", 10) || 3100);
+  const backendApiKeyRaw = env.BACKEND_API_KEY || env.MMB_API_TOKEN || env.VITE_BACKEND_API_KEY || "";
+  const BACKEND_PROXY_KEY = String(backendApiKeyRaw).trim();
+  if (!BACKEND_PROXY_KEY) {
+    // BACKEND_API_KEY is required for the dev proxy security layer.
+    // Without it, all /backend-api/* requests will be blocked by the server.
+    // Add BACKEND_API_KEY=any-random-string to your .env file.
+    throw new Error(
+      "Missing BACKEND_API_KEY — add BACKEND_API_KEY=your-secret to .env\n" +
+      "  (same value must be set in server .env or user-settings.json)\n" +
+      "  Example: BACKEND_API_KEY=mmb-local-dev-2025",
+    );
+  }
 
   function moreloginRequest(apiPath: string, method: string, body?: string): Promise<{ status: number; data: string }> {
     return new Promise((resolve, reject) => {
@@ -82,7 +99,7 @@ export default defineConfig(({ mode }) => {
           if (req.method === 'OPTIONS') {
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-MMB-Token, x-api-key');
             res.statusCode = 204;
             res.end();
             return;
@@ -102,7 +119,10 @@ export default defineConfig(({ mode }) => {
                 port: Number(BACKEND_PORT),
                 path: apiPath,
                 method: req.method || 'GET',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {
+                  'Content-Type': 'application/json',
+                  'x-api-key': BACKEND_PROXY_KEY,
+                },
                 timeout: 120000,
               };
               if (payload)
@@ -263,7 +283,7 @@ export default defineConfig(({ mode }) => {
   },
   server: {
     port: 5178,
-    strictPort: true,
+    strictPort: false,   // allow fallback to next available port if 5178 is busy
     host: true,
   },
   preview: {
@@ -273,6 +293,11 @@ export default defineConfig(({ mode }) => {
         target: `http://127.0.0.1:${BACKEND_PORT}`,
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/backend-api/, ''),
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader('x-api-key', BACKEND_PROXY_KEY);
+          });
+        },
       },
       '/morelogin-api': {
         target: MORELOGIN_BASE,

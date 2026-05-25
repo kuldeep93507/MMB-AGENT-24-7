@@ -37,7 +37,7 @@ const COOKIE_IMPORT_TIMEOUT = 10000;
 
 // Default provider URLs
 const DEFAULT_MORELOGIN_PORT = 40000;
-const DEFAULT_MORELOGIN_API_KEY = 'dbc21d41137f29238f4679e71b7986decb0581115e34a84e';
+
 const MULTILOGIN_CLOUD_API = 'https://api.multilogin.com';
 
 class CookieImporter {
@@ -45,7 +45,7 @@ class CookieImporter {
     // MoreLogin config
     this.moreloginPort = parseInt(process.env.MORELOGIN_PORT, 10) || DEFAULT_MORELOGIN_PORT;
     this.moreloginBaseUrl = `http://127.0.0.1:${this.moreloginPort}`;
-    this.moreloginApiKey = process.env.MORELOGIN_API_KEY || DEFAULT_MORELOGIN_API_KEY;
+    this.moreloginApiKey = String(process.env.MORELOGIN_API_KEY || '').trim();
 
     // Multilogin config
     this.multiloginEmail = process.env.MULTILOGIN_EMAIL || '';
@@ -97,6 +97,11 @@ class CookieImporter {
    * @private
    */
   async _importMoreLogin(profileId, cookies) {
+    if (!this.moreloginApiKey) {
+      const errMsg = 'MORELOGIN_API_KEY is missing — cookie import aborted';
+      console.warn(`[CookieImporter] ${errMsg} (profileId: ${profileId})`);
+      return { success: false, cookiesImported: false, error: errMsg };
+    }
     const url = `${this.moreloginBaseUrl}/api/env/cookie/import`;
     const headers = {
       'Content-Type': 'application/json',

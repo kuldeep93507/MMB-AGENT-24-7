@@ -127,6 +127,7 @@ class ProfileRecycleManager {
           lastError: s.lastError || null,
           errorRetries: s.errorRetries || 0,
           enabled: s.enabled !== false,
+          isPaused: s.isPaused || false,
         })),
       };
       fs.writeFileSync(RECYCLE_FILE, JSON.stringify(payload, null, 2));
@@ -154,6 +155,20 @@ class ProfileRecycleManager {
           this._recoverErrorSlot(slot).catch(() => {});
         } else if (slot.status === 'queued' || slot.status === 'idle') {
           this._tryRunSlot(slot).catch(() => {});
+        } else if (slot.status === 'running') {
+          // BUG FIX: worker may have died without triggering onWorkerFinished
+          // (crash, CDP drop, process kill). Detect stale 'running' slots and recover.
+          if (!this._isWorkerActive(slot.currentProfileId)) {
+            this._log('warn', `${slot.profileName} — stale 'running' slot detected (worker gone), forcing cooldown`);
+            slot.errorRetries = (slot.errorRetries || 0) + 1;
+            slot.lastError = 'Worker died silently';
+            slot.status = 'cooldown';
+            // Use user's configured cooldown (not hardcoded 5 min) so 1-min setting is respected
+            const silentDeathCooldown = this.cooldownMinMs || ERROR_RETRY_MS;
+            slot.cooldownUntil = Date.now() + silentDeathCooldown;
+            this._saveState();
+            this._scheduleCooldown(slot.slotId, silentDeathCooldown);
+          }
         }
       }
     }, QUEUE_POLL_MS);
@@ -343,10 +358,21 @@ class ProfileRecycleManager {
       return;
     }
 
-    // Double-check orchestrator — don't cooldown while worker still active
+    // Double-check orchestrator — don't cooldown while worker still active.
+    // If worker status hasn't cleared yet (race condition: onWorkerFinished fires
+    // before orchestrator.getWorkerStatus() reflects the done state), retry once
+    // after 2 seconds rather than silently bailing out (which would leave the slot
+    // stuck in 'running' forever).
     const ws = this.deps.orchestrator.getWorkerStatus(profileId);
     if (ws && ['running', 'watching', 'searching', 'starting', 'connecting', 'waiting'].includes(ws.status)) {
-      this._log('warn', `${slot.profileName} — worker still ${ws.status}, not starting cooldown yet`);
+      this._log('warn', `${slot.profileName} — worker still ${ws.status}, retrying in 2s`);
+      setTimeout(() => {
+        // Re-enter onWorkerFinished only if slot is still 'running' for this profileId
+        const s = this.slots.get(slotId);
+        if (s && s.currentProfileId === profileId && s.status === 'running') {
+          this.onWorkerFinished(profileId, { success, status, watched });
+        }
+      }, 2000);
       return;
     }
 
@@ -563,6 +589,48 @@ class ProfileRecycleManager {
     }
   }
 
+  /**
+   * Pause all active 24/7 slots — stop running workers, freeze cooldowns.
+   * Slots are held in 'cooldown' with a very far future until (999h).
+   * Loop remains 'enabled' so resume works without re-configuring.
+   */
+  pause() {
+    if (!this.enabled) return this.getStatus();
+    this._log('info', '24/7 loop PAUSED — stopping workers and freezing cooldowns');
+    const FAR_FUTURE = Date.now() + 999 * 60 * 60 * 1000; // 999 hours
+    for (const slot of this.slots.values()) {
+      if (slot.enabled === false) continue;
+      // Cancel any active cooldown timer
+      const t = this._timers.get(slot.slotId);
+      if (t) { clearTimeout(t); this._timers.delete(slot.slotId); }
+      // Stop running worker
+      this._stopOrchestratorWorker(slot.currentProfileId);
+      // Freeze slot
+      slot.isPaused = true;
+      slot.status = 'cooldown';
+      slot.cooldownUntil = FAR_FUTURE;
+    }
+    this._saveState();
+    return this.getStatus();
+  }
+
+  /**
+   * Resume paused slots — immediately trigger next cycle for all paused slots.
+   */
+  resume() {
+    if (!this.enabled) return this.getStatus();
+    this._log('info', '24/7 loop RESUMED — restarting all paused slots');
+    for (const slot of this.slots.values()) {
+      if (slot.enabled === false || !slot.isPaused) continue;
+      slot.isPaused = false;
+      slot.cooldownUntil = Date.now() + 2000; // 2s delay before start
+      // Schedule immediate cooldown expiry
+      this._scheduleCooldown(slot.slotId, 2000);
+    }
+    this._saveState();
+    return this.getStatus();
+  }
+
   isRecycleProfile(profileId) {
     return this.profileToSlot.has(profileId);
   }
@@ -578,6 +646,7 @@ class ProfileRecycleManager {
       lastError: s.lastError,
       videoCount: s.assignment?.videos?.length || 0,
       enabled: s.enabled !== false,
+      isPaused: s.isPaused || false,
       profileIdChangedAt: s.profileIdChangedAt || null,
     }));
     return {

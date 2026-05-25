@@ -44,12 +44,19 @@ app.use(cors({
     } catch (_) { /* ignore */ }
     return cb(null, false);
   },
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-MMB-Token', 'x-api-key'],
 }));
 app.use(express.json());
+
+const { requireBackendApiKey } = require('./backendApiKeyAuth.cjs');
+app.use(requireBackendApiKey);
 
 const PORT = getServerPort();
 
 const activeAgents = new Map();
+
+/** POST /api/jobs entries returned alongside worker rows via GET /api/workers */
+const automationJobLedger = [];
 
 // Orchestrator (for scheduled/shuffle runs — worker threads)
 const orchestrator = new Orchestrator();
@@ -184,7 +191,7 @@ agentManager.on('circuitOpen', () => {
 });
 
 let lastRamWarningAt = 0;
-setInterval(() => {
+const _ramWarnIntervalId = setInterval(() => {
   try {
     const status = agentManager.getStatus();
     const pct = status?.health?.memory?.usedPercent;
@@ -192,21 +199,26 @@ setInterval(() => {
       const now = Date.now();
       if (now - lastRamWarningAt > 30 * 60 * 1000) {
         lastRamWarningAt = now;
-        notificationService.warning('High RAM usage', `Memory at ${pct}% — new YT agent launches may pause`).catch(() => {});
+        notificationService.warning('High RAM usage', `Memory at ${pct}% — new YT agent launches may pause`).catch((err) => {
+          console.error('[RAM warn] telegram:', err.message);
+        });
       }
     }
-  } catch {}
+  } catch (ramErr) {
+    console.warn('[RAM monitor] Tick failed:', ramErr.message);
+  }
 }, 60 * 1000);
 
 // Watch History — persisted to file
 const HISTORY_FILE = path.resolve(__dirname, '..', 'watch_history.json');
+const { atomicWriteJson } = require('./analyticsStore.cjs');
 
 function loadWatchHistory() {
   try { return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')); } catch { return {}; }
 }
 function saveWatchHistory(history) {
   try {
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(history, null, 2));
+    atomicWriteJson(HISTORY_FILE, history);
   } catch (err) {
     // Log the error so disk-full / permission issues are visible
     console.error('[WatchHistory] Failed to save watch_history.json:', err.message);
@@ -374,6 +386,17 @@ function applySettingsToEnv(s) {
   setIfNonEmpty('MULTILOGIN_PASSWORD', s.multiloginPassword);
   setIfNonEmpty('MULTILOGIN_TOKEN', s.multiloginToken);
   setIfNonEmpty('MULTILOGIN_FOLDER_ID', s.multiloginFolderId);
+  // Support multiple folder IDs (array stored in settings)
+  if (Array.isArray(s.multiloginFolderIds) && s.multiloginFolderIds.length) {
+    const allIds = [...new Set([
+      ...(s.multiloginFolderId ? [s.multiloginFolderId] : []),
+      ...s.multiloginFolderIds,
+    ])].filter(Boolean);
+    process.env.MULTILOGIN_FOLDER_IDS = allIds.join(',');
+    if (!process.env.MULTILOGIN_FOLDER_ID && allIds[0]) {
+      process.env.MULTILOGIN_FOLDER_ID = allIds[0];
+    }
+  }
   if (s.proxyServer) process.env.PROXY_SERVER = String(s.proxyServer);
   if (s.proxyPort) process.env.PROXY_PORT = String(s.proxyPort);
   setIfNonEmpty('PROXY_PASSWORD', s.proxyPassword);
@@ -394,6 +417,9 @@ applySettingsToEnv(appSettings);
 applyYtAgentSettingsFromApp(appSettings);
 applyNotificationSettingsFromApp(appSettings);
 restartTrashJanitor();
+
+const { assertRequiredSecretsOrExit } = require('./bootSecrets.cjs');
+assertRequiredSecretsOrExit(appSettings);
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // MORELOGIN API HELPER
@@ -672,95 +698,90 @@ app.post('/api/notifications/test', async (req, res) => {
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// REAL-TIME ANALYTICS TRACKING — Persisted to file
+// REAL-TIME ANALYTICS TRACKING — Persisted with serialized writes + atomic file swap
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const ANALYTICS_FILE = path.resolve(__dirname, '..', 'analytics_data.json');
+const { createAnalyticsStore } = require('./analyticsStore.cjs');
+const analyticsStore = createAnalyticsStore(ANALYTICS_FILE);
+// Expose globally so engagementQueue.cjs can track analytics without circular deps
+global.mmbAnalyticsStore = analyticsStore;
 
-function loadAnalytics() {
-  try { return JSON.parse(fs.readFileSync(ANALYTICS_FILE, 'utf8')); } catch {}
-  return { totalViews: 0, totalWatchTime: 0, totalSessions: 0, totalLikes: 0, totalSubscribes: 0, totalComments: 0, perProfile: {}, recentActivity: [] };
-}
-
-// Debounced save — batch writes every 5 seconds instead of every single request
-let _analyticsSaveTimer = null;
-function saveAnalytics(data) {
-  if (_analyticsSaveTimer) return; // Already scheduled
-  _analyticsSaveTimer = setTimeout(() => {
-    try { fs.writeFileSync(ANALYTICS_FILE, JSON.stringify(data, null, 2)); } catch {}
-    _analyticsSaveTimer = null;
-  }, 5000);
-}
-
-const analyticsData = loadAnalytics();
-
-setInterval(() => {
+const _analyticsDailyInterval = setInterval(() => {
   try {
     const status = agentManager.getStatus();
     const active = Object.values(status?.agents || {}).filter(a => a.status === 'running' || a.status === 'watching').length;
+    const snap = analyticsStore.snapshotSync();
     notificationService.dailyReport({
-      totalViews: analyticsData.totalViews || 0,
-      totalWatchTime: analyticsData.totalWatchTime || 0,
-      totalLikes: analyticsData.totalLikes || 0,
+      totalViews: snap.totalViews || 0,
+      totalWatchTime: snap.totalWatchTime || 0,
+      totalLikes: snap.totalLikes || 0,
       activeAgents: active,
-    }).catch(() => {});
-  } catch {}
+    }).catch((err) => console.error('[notify] Daily report:', err.message));
+  } catch (err) {
+    console.error('[analytics] daily interval:', err.message);
+  }
 }, 60 * 60 * 1000);
 
 // Track an action
-app.post('/api/analytics/track', (req, res) => {
+app.post('/api/analytics/track', async (req, res) => {
   const { profileId, action, value } = req.body;
   if (!profileId || !action) return res.status(400).json({ error: 'profileId and action required' });
 
-  // Initialize profile if needed
-  if (!analyticsData.perProfile[profileId]) {
-    analyticsData.perProfile[profileId] = { views: 0, watchTime: 0, likes: 0, subscribes: 0, comments: 0 };
+  try {
+    await analyticsStore.enqueue((analyticsData) => {
+      if (!analyticsData.perProfile[profileId]) {
+        analyticsData.perProfile[profileId] = { views: 0, watchTime: 0, likes: 0, subscribes: 0, comments: 0 };
+      }
+      const p = analyticsData.perProfile[profileId];
+
+      switch (action) {
+        case 'view': analyticsData.totalViews++; p.views++; break;
+        case 'watchTime': analyticsData.totalWatchTime += (value || 0); p.watchTime += (value || 0); break;
+        case 'like': analyticsData.totalLikes++; p.likes++; break;
+        case 'subscribe': analyticsData.totalSubscribes++; p.subscribes++; break;
+        case 'comment': analyticsData.totalComments++; p.comments++; break;
+        case 'session': analyticsData.totalSessions++; break;
+        case 'ads_total': analyticsData.totalAds = (analyticsData.totalAds || 0) + (value || 1); break;
+        case 'ads_skipped': analyticsData.adsSkipped = (analyticsData.adsSkipped || 0) + (value || 1); break;
+        case 'ads_watched_full': analyticsData.adsWatchedFull = (analyticsData.adsWatchedFull || 0) + (value || 1); break;
+        case 'ad_watch_time': analyticsData.adWatchTime = (analyticsData.adWatchTime || 0) + (value || 0); break;
+        case 'traffic_youtube-search': analyticsData.trafficYouTube = (analyticsData.trafficYouTube || 0) + 1; break;
+        case 'traffic_google': analyticsData.trafficGoogle = (analyticsData.trafficGoogle || 0) + 1; break;
+        case 'traffic_bing': analyticsData.trafficBing = (analyticsData.trafficBing || 0) + 1; break;
+        case 'traffic_direct': analyticsData.trafficDirect = (analyticsData.trafficDirect || 0) + 1; break;
+        case 'traffic_direct-fallback':
+        case 'traffic_direct-rare':
+        case 'traffic_mobile-direct-fallback':
+          analyticsData.trafficDirectFallback = (analyticsData.trafficDirectFallback || 0) + 1;
+          break;
+        case 'traffic_channel-page': analyticsData.trafficChannel = (analyticsData.trafficChannel || 0) + 1; break;
+        case 'traffic_backlink':
+          analyticsData.trafficBacklink = (analyticsData.trafficBacklink || 0) + 1;
+          break;
+        case 'traffic_backlink-direct-fallback':
+          analyticsData.trafficBacklinkFallback = (analyticsData.trafficBacklinkFallback || 0) + 1;
+          break;
+        default: break;
+      }
+
+      if (!analyticsData.recentActivity) analyticsData.recentActivity = [];
+      analyticsData.recentActivity.push({ profileId, action, value, time: Date.now() });
+      if (analyticsData.recentActivity.length > 500) {
+        analyticsData.recentActivity = analyticsData.recentActivity.slice(-500);
+      }
+
+      if (!analyticsData.dailyLog) analyticsData.dailyLog = [];
+      analyticsData.dailyLog.push({ profileId, action, value: value || 1, time: Date.now() });
+      const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      if (analyticsData.dailyLog.length > 50000) {
+        analyticsData.dailyLog = analyticsData.dailyLog.filter(e => e.time > thirtyDaysAgo);
+      }
+    });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[analytics] track enqueue failed:', err.message);
+    res.status(500).json({ success: false, error: err.message });
   }
-  const p = analyticsData.perProfile[profileId];
-
-  switch (action) {
-    case 'view': analyticsData.totalViews++; p.views++; break;
-    case 'watchTime': analyticsData.totalWatchTime += (value || 0); p.watchTime += (value || 0); break;
-    case 'like': analyticsData.totalLikes++; p.likes++; break;
-    case 'subscribe': analyticsData.totalSubscribes++; p.subscribes++; break;
-    case 'comment': analyticsData.totalComments++; p.comments++; break;
-    case 'session': analyticsData.totalSessions++; break;
-    case 'ads_total': analyticsData.totalAds = (analyticsData.totalAds || 0) + (value || 1); break;
-    case 'ads_skipped': analyticsData.adsSkipped = (analyticsData.adsSkipped || 0) + (value || 1); break;
-    case 'ads_watched_full': analyticsData.adsWatchedFull = (analyticsData.adsWatchedFull || 0) + (value || 1); break;
-    case 'ad_watch_time': analyticsData.adWatchTime = (analyticsData.adWatchTime || 0) + (value || 0); break;
-    case 'traffic_youtube-search': analyticsData.trafficYouTube = (analyticsData.trafficYouTube || 0) + 1; break;
-    case 'traffic_google': analyticsData.trafficGoogle = (analyticsData.trafficGoogle || 0) + 1; break;
-    case 'traffic_bing': analyticsData.trafficBing = (analyticsData.trafficBing || 0) + 1; break;
-    case 'traffic_direct': analyticsData.trafficDirect = (analyticsData.trafficDirect || 0) + 1; break;
-    case 'traffic_direct-fallback':
-    case 'traffic_direct-rare':
-    case 'traffic_mobile-direct-fallback':
-      analyticsData.trafficDirectFallback = (analyticsData.trafficDirectFallback || 0) + 1;
-      break;
-    case 'traffic_channel-page': analyticsData.trafficChannel = (analyticsData.trafficChannel || 0) + 1; break;
-    case 'traffic_backlink':
-      analyticsData.trafficBacklink = (analyticsData.trafficBacklink || 0) + 1;
-      break;
-    case 'traffic_backlink-direct-fallback':
-      analyticsData.trafficBacklinkFallback = (analyticsData.trafficBacklinkFallback || 0) + 1;
-      break;
-  }
-
-  analyticsData.recentActivity.push({ profileId, action, value, time: Date.now() });
-  if (analyticsData.recentActivity.length > 500) analyticsData.recentActivity = analyticsData.recentActivity.slice(-500);
-
-  // Daily log — store per-day data for date filtering
-  if (!analyticsData.dailyLog) analyticsData.dailyLog = [];
-  analyticsData.dailyLog.push({ profileId, action, value: value || 1, time: Date.now() });
-  // Keep last 30 days of daily log (max ~50k entries)
-  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  if (analyticsData.dailyLog.length > 50000) {
-    analyticsData.dailyLog = analyticsData.dailyLog.filter(e => e.time > thirtyDaysAgo);
-  }
-
-  // Persist to file
-  saveAnalytics(analyticsData);
-  res.json({ success: true });
 });
 
 function buildDailyTrendFromLogs(logs) {
@@ -826,26 +847,34 @@ function aggregateAnalyticsFromLogs(logs, recentActivity, filterMeta) {
   return filtered;
 }
 
-app.post('/api/analytics/reset-today-engagement', (req, res) => {
+app.post('/api/analytics/reset-today-engagement', async (req, res) => {
   try {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    const t0 = todayStart.getTime();
-    const engagement = new Set(['like', 'subscribe', 'comment']);
-    analyticsData.dailyLog = (analyticsData.dailyLog || []).filter(
-      (e) => !(e.time >= t0 && engagement.has(e.action)),
-    );
-    saveAnalytics(analyticsData);
+    await analyticsStore.enqueue((analyticsData) => {
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const t0 = todayStart.getTime();
+      const engagement = new Set(['like', 'subscribe', 'comment']);
+      analyticsData.dailyLog = (analyticsData.dailyLog || []).filter(
+        (e) => !(e.time >= t0 && engagement.has(e.action)),
+      );
+    });
     res.json({ success: true });
   } catch (err) {
+    console.error('[analytics] reset enqueue failed:', err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
 // Get analytics (with optional date filter)
-app.get('/api/analytics', (req, res) => {
-  const { filter } = req.query; // 'today', 'yesterday', '7d', '30d', 'all'
-  
+app.get('/api/analytics', async (req, res) => {
+  try {
+    await analyticsStore.flushPending();
+  } catch (err) {
+    console.warn('[analytics] flush before read:', err.message);
+  }
+  const analyticsData = analyticsStore.snapshotSync();
+  const { filter } = req.query;
+
   if (!filter || filter === 'all') {
     const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
     const logs = (analyticsData.dailyLog || []).filter((e) => e.time >= thirtyDaysAgo);
@@ -857,13 +886,12 @@ app.get('/api/analytics', (req, res) => {
       filter: 'all',
     });
   }
-  
-  // Calculate time range
+
   const now = Date.now();
   const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
   let fromTime = 0;
   let toTime = now;
-  
+
   switch (filter) {
     case 'today':
       fromTime = todayStart.getTime();
@@ -881,7 +909,7 @@ app.get('/api/analytics', (req, res) => {
     default:
       return res.json(analyticsData);
   }
-  
+
   const logs = (analyticsData.dailyLog || []).filter(e => e.time >= fromTime && e.time <= toTime);
   const recent = (analyticsData.recentActivity || []).filter(e => e.time >= fromTime && e.time <= toTime);
   res.json(aggregateAnalyticsFromLogs(logs, recent.slice(-100), { filter, fromTime, toTime }));
@@ -1137,6 +1165,103 @@ app.post('/api/recycle/stop', (req, res) => {
   res.json({ success: true, status });
 });
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GMAIL LOGIN MANAGER API
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const gmailLoginManager = require('./gmailLoginManager.cjs');
+
+app.post('/api/gmail-login/start', (req, res) => {
+  const { credentials, batchSize } = req.body || {};
+  if (!Array.isArray(credentials) || !credentials.length) {
+    return res.status(400).json({ ok: false, error: 'credentials array required' });
+  }
+  const result = gmailLoginManager.start(credentials, batchSize || 3);
+  res.json(result);
+});
+
+app.post('/api/gmail-login/stop', (req, res) => {
+  res.json(gmailLoginManager.stop());
+});
+
+app.get('/api/gmail-login/status', (req, res) => {
+  res.json(gmailLoginManager.getStatus());
+});
+
+app.post('/api/gmail-login/mark-done/:profileId', (req, res) => {
+  res.json(gmailLoginManager.markResume(req.params.profileId));
+});
+
+app.post('/api/gmail-login/skip/:profileId', (req, res) => {
+  res.json(gmailLoginManager.markSkip(req.params.profileId));
+});
+
+app.post('/api/gmail-login/retry/:profileId', (req, res) => {
+  res.json(gmailLoginManager.retryEntry(req.params.profileId));
+});
+
+app.post('/api/gmail-login/clear', (req, res) => {
+  res.json(gmailLoginManager.clearAll());
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ENGAGEMENT QUEUE API
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const { engagementQueue } = require('./engagementQueue.cjs');
+
+// Start engagement jobs for a batch of profiles
+app.post('/api/engagement/start', async (req, res) => {
+  try {
+    const {
+      profiles,        // [{ profileId, profileName, browserType, source, delayMs, actions, videos[] }]
+      watchPct,        // 0-100
+      adSkipEnabled,   // boolean (default true)
+      videoQuality,    // 'auto'|'144p'|...|'1080p'
+    } = req.body;
+
+    if (!profiles || !profiles.length) {
+      return res.status(400).json({ code: -1, message: 'profiles required' });
+    }
+
+    const jobIds = engagementQueue.enqueue({
+      profiles,
+      watchPct:       watchPct       ?? 40,
+      adSkipEnabled:  adSkipEnabled  !== false,
+      videoQuality:   videoQuality   || 'auto',
+    });
+
+    res.json({ code: 0, message: `Queued ${jobIds.length} engagement jobs`, jobIds });
+  } catch (err) {
+    res.status(500).json({ code: -1, message: err.message });
+  }
+});
+
+// Get queue status
+app.get('/api/engagement/status', (req, res) => {
+  res.json({ code: 0, data: engagementQueue.getStatus() });
+});
+
+// Cancel all pending jobs
+app.post('/api/engagement/cancel', (req, res) => {
+  engagementQueue.cancelAll();
+  res.json({ code: 0, message: 'Cancelled all pending jobs' });
+});
+
+// Clear finished/failed/cancelled jobs
+app.post('/api/engagement/clear', (req, res) => {
+  engagementQueue.clearFinished();
+  res.json({ code: 0, message: 'Cleared finished jobs' });
+});
+
+app.post('/api/recycle/pause', (req, res) => {
+  const status = profileRecycleManager.pause();
+  res.json({ success: true, status });
+});
+
+app.post('/api/recycle/resume', (req, res) => {
+  const status = profileRecycleManager.resume();
+  res.json({ success: true, status });
+});
+
 app.put('/api/recycle/config', (req, res) => {
   const { cooldownMinMinutes, cooldownMaxMinutes, profileIds } = req.body || {};
   const status = profileRecycleManager.updateConfig({ cooldownMinMinutes, cooldownMaxMinutes, profileIds });
@@ -1219,7 +1344,8 @@ app.post('/api/proxy/rotate', async (req, res) => {
 
     let providerUpdated = false;
     let providerMessage = '';
-    const bt = (browserType || '').toLowerCase();
+    // Default to BROWSER_PROVIDER env var when browserType not sent in request
+    const bt = (browserType || process.env.BROWSER_PROVIDER || '').toLowerCase();
     if (bt === 'morelogin' || bt === 'multilogin') {
       const push = await updateProviderProxy(profileId, bt, newProxy);
       providerUpdated = push.success;
@@ -1399,8 +1525,8 @@ app.post('/api/schedule/timer/cancel', (req, res) => {
   res.json({ success: true });
 });
 
-// Check every 60 seconds for due schedules (respects max concurrent like /api/schedule/run)
-setInterval(() => {
+// Check every 15s for due schedules (respects max concurrent like /api/schedule/run)
+const _scheduledJobsTickerId = setInterval(() => {
   const now = Date.now();
   for (const [id, job] of scheduledJobs) {
     if (!job.nextRun || now < job.nextRun) continue;
@@ -1445,8 +1571,36 @@ try {
 // WORKER THREAD STATUS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+app.post('/api/jobs', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const { randomUUID } = require('crypto');
+  const taskType = String(body.taskType || 'watch_video').trim();
+  const profileId = body.profileId != null ? String(body.profileId).trim() : '';
+  const profileName = body.profileName != null ? String(body.profileName).trim() : `Profile-${profileId.slice(-4)}`;
+  if (!profileId) return res.status(400).json({ error: 'profileId required' });
+
+  const job = {
+    id: `${profileId}-${randomUUID()}`,
+    profileId,
+    profileName,
+    taskType,
+    status: 'pending',
+    retryCount: 0,
+    createdAt: Date.now(),
+    details: typeof body.details === 'string' ? body.details.slice(0, 500) : undefined,
+    queuedBy: typeof body.source === 'string' ? body.source.slice(0, 80) : 'ui',
+  };
+  automationJobLedger.unshift(job);
+  if (automationJobLedger.length > 500) automationJobLedger.length = 500;
+  res.json({ success: true, job });
+});
+
 app.get('/api/workers', (req, res) => {
-  res.json({ workers: orchestrator.getAllStatuses(), stats: orchestrator.getStats() });
+  res.json({
+    workers: orchestrator.getAllStatuses(),
+    stats: orchestrator.getStats(),
+    queuedJobs: automationJobLedger.slice(0, 200),
+  });
 });
 
 app.get('/api/workers/:profileId', (req, res) => {
@@ -1496,8 +1650,10 @@ app.get('/api/providers/ping', (req, res) => {
 
 // Start profiles for manual control (connect CDP but don't automate)
 app.post('/api/manual/start', async (req, res) => {
-  const { profileIds } = req.body;
+  const { profileIds, profileMeta } = req.body || {};
   if (!profileIds || !Array.isArray(profileIds)) return res.status(400).json({ error: 'profileIds required' });
+
+  const meta = profileMeta && typeof profileMeta === 'object' ? profileMeta : {};
 
   const results = [];
   for (const profileId of profileIds) {
@@ -1516,8 +1672,10 @@ app.post('/api/manual/start', async (req, res) => {
       }
 
       if (debugPort) {
-        // Connect agent
-        const agent = new ProfileAgent(profileId, `Manual-${profileId.slice(-4)}`, debugPort);
+        const pidKey = typeof profileId === 'string' ? profileId : String(profileId);
+        const hint = meta[pidKey] && typeof meta[pidKey] === 'object' ? meta[pidKey] : {};
+        const profileOs = typeof hint.os === 'string' ? hint.os : '';
+        const agent = new ProfileAgent(profileId, `Manual-${profileId.slice(-4)}`, debugPort, { profileOs });
         await agent.connect();
         activeAgents.set(profileId, agent);
 
@@ -1734,6 +1892,22 @@ app.post('/api/manual/batch', async (req, res) => {
           await page.keyboard.press('j');
           return { profileId, status: 'ok', action: 'skipped -10s' };
         }
+        case 'closeTab': {
+          const osHint = agent.profileOs || '';
+          const s = osHint.toLowerCase();
+          const macLike = s.includes('mac') || s.includes('ios');
+          try {
+            if (macLike) {
+              await page.keyboard.press('Meta+KeyW');
+            } else {
+              await page.keyboard.press('Control+KeyW');
+            }
+            return { profileId, status: 'ok', action: macLike ? 'closeTab (⌘W)' : 'closeTab (Ctrl+W)' };
+          } catch (ctErr) {
+            console.error('[Manual] closeTab failed:', ctErr.message);
+            return { profileId, status: 'error', action: ctErr.message || String(ctErr) };
+          }
+        }
         case 'newTab': {
           const newPage = await agent.context.newPage();
           await newPage.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
@@ -1824,28 +1998,30 @@ app.post('/api/settings/save', (req, res) => {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 app.post('/api/update/run', requireAuth, async (req, res) => {
-  const { execSync } = require('child_process');
-  const path = require('path');
+  const { execFileSync } = require('child_process');
   const projectDir = path.resolve(__dirname, '..');
 
   console.log('━━━ Running Update ━━━');
   try {
-    // Step 1: git pull
+    // Step 1: git pull — array argv only (no shell interpolation)
     console.log('[Update] Running git pull...');
-    const pullResult = execSync('git pull', { cwd: projectDir, encoding: 'utf8', timeout: 30000 });
+    const pullResult = execFileSync('git', ['pull'], { cwd: projectDir, encoding: 'utf8', timeout: 30000 });
     console.log('[Update] git pull:', pullResult.trim());
 
-    // Step 2: npm install (in case new packages)
+    // Step 2: npm install (Windows: npm.cmd)
     console.log('[Update] Running npm install...');
-    execSync('npm install', { cwd: projectDir, encoding: 'utf8', timeout: 60000 });
+    const npmExe = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    execFileSync(npmExe, ['install'], { cwd: projectDir, encoding: 'utf8', timeout: 120000 });
     console.log('[Update] npm install done');
 
     // Step 3: Read new version
     let newVersion = '1.0.0';
     try {
-      const versionFile = require('fs').readFileSync(path.join(projectDir, 'version.json'), 'utf8');
+      const versionFile = fs.readFileSync(path.join(projectDir, 'version.json'), 'utf8');
       newVersion = JSON.parse(versionFile).version;
-    } catch {}
+    } catch (verErr) {
+      console.warn('[Update] Could not read version.json:', verErr.message);
+    }
 
     console.log(`[Update] ✅ Updated to v${newVersion}`);
     res.json({ success: true, message: 'Update complete! Restart to apply.', newVersion, pullResult: pullResult.trim() });
@@ -1868,17 +2044,35 @@ app.get('/api/update/version', (req, res) => {
 // Push update to GitHub (from main laptop)
 app.post('/api/update/push', requireAuth, async (req, res) => {
   const { execFileSync } = require('child_process');
-  const fs = require('fs');
-  const path = require('path');
   const projectDir = path.resolve(__dirname, '..');
-  const { version, changelog } = req.body;
+  const { version, changelog } = req.body || {};
+  const {
+    validateVersion,
+    normalizeChangelogArray,
+    buildCommitMessage,
+  } = require('./updatePushValidators.cjs');
 
-  if (!version || !changelog) return res.status(400).json({ success: false, message: 'version and changelog required' });
+  const vCheck = validateVersion(version);
+  if (!vCheck.ok) {
+    return res.status(400).json({ success: false, message: vCheck.error });
+  }
 
-  console.log(`━━━ Pushing Update v${version} ━━━`);
+  const cCheck = normalizeChangelogArray(changelog);
+  if (!cCheck.ok) {
+    return res.status(400).json({ success: false, message: cCheck.error });
+  }
+
+  const safeVersion = vCheck.version;
+  const sanitizedChangelog = cCheck.changelog;
+
+  console.log(`━━━ Pushing Update v${safeVersion} ━━━`);
   try {
-    // Step 1: Update version.json
-    const versionData = { version, lastUpdate: new Date().toISOString().split('T')[0], changelog };
+    // Step 1: Update version.json (sanitized changelog only)
+    const versionData = {
+      version: safeVersion,
+      lastUpdate: new Date().toISOString().split('T')[0],
+      changelog: sanitizedChangelog,
+    };
     fs.writeFileSync(path.join(projectDir, 'version.json'), JSON.stringify(versionData, null, 2));
     console.log('[Push] version.json updated');
 
@@ -1886,147 +2080,21 @@ app.post('/api/update/push', requireAuth, async (req, res) => {
     execFileSync('git', ['add', '-A'], { cwd: projectDir, encoding: 'utf8' });
     console.log('[Push] git add done');
 
-    // Step 3: git commit — using array args (no shell injection possible)
-    const safeVersion = version.replace(/[^a-zA-Z0-9._-]/g, '');
-    const safeChangelog = Array.isArray(changelog) ? changelog.slice(0, 3).join(', ') : String(changelog).slice(0, 100);
-    const commitMsg = `v${safeVersion}: ${safeChangelog}`;
+    const commitMsg = buildCommitMessage(safeVersion, sanitizedChangelog);
     execFileSync('git', ['commit', '-m', commitMsg], { cwd: projectDir, encoding: 'utf8' });
     console.log('[Push] git commit done');
 
-    // Step 4: git push (safe — no user input)
+    // Step 3: git push (safe — no user input)
     const pushResult = execFileSync('git', ['push'], { cwd: projectDir, encoding: 'utf8', timeout: 30000 });
     console.log('[Push] git push done:', pushResult.trim());
 
-    console.log(`[Push] ✅ v${version} pushed to GitHub!`);
-    res.json({ success: true, message: `v${version} pushed to GitHub!` });
+    console.log(`[Push] ✅ v${safeVersion} pushed to GitHub!`);
+    res.json({ success: true, message: `v${safeVersion} pushed to GitHub!` });
   } catch (err) {
     console.error('[Push] ❌ Failed:', err.message);
     res.json({ success: false, message: err.message });
   }
 });
-
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// PROFILE AGENT RUNNER
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-async function runProfileAgent(profileId, schedule, index, delayMs) {
-  // Wait for staggered start
-  console.log(`[Agent ${index + 1}] Waiting ${Math.round(delayMs / 1000)}s before starting profile ${profileId}...`);
-  await sleep(delayMs);
-
-  try {
-    // Step 1: Start browser profile via provider (MultiLogin/MoreLogin)
-    console.log(`[Agent ${index + 1}] Starting profile: ${profileId}`);
-    let debugPort = null;
-
-    const provider = providerFactory.getProvider();
-    const startRes = await provider.startProfile(profileId);
-
-    if (startRes.code === 0 && startRes.data?.cdpPort) {
-      debugPort = startRes.data.cdpPort;
-      console.log(`[Agent ${index + 1}] Profile started! CDP port: ${debugPort}`);
-    } else {
-      // Start might take time — wait and retry once
-      console.log(`[Agent ${index + 1}] Start response: ${startRes.message || 'waiting...'} — retrying in 10s...`);
-      await sleep(10000);
-      const retryRes = await provider.startProfile(profileId);
-      if (retryRes.code === 0 && retryRes.data?.cdpPort) {
-        debugPort = retryRes.data.cdpPort;
-        console.log(`[Agent ${index + 1}] Profile now running! CDP port: ${debugPort}`);
-      } else {
-        console.error(`[Agent ${index + 1}] Failed to start profile after retry`);
-        return;
-      }
-    }
-
-    if (!debugPort) {
-      console.error(`[Agent ${index + 1}] No debug port available`);
-      return;
-    }
-
-    // Step 2: Create agent and connect via CDP
-    const agent = new ProfileAgent(profileId, `Profile-${profileId.slice(-4)}`, debugPort);
-    activeAgents.set(profileId, agent);
-
-    const connected = await agent.connect();
-    if (!connected) {
-      console.error(`[Agent ${index + 1}] CDP connection failed`);
-      activeAgents.delete(profileId);
-      return;
-    }
-
-    // Step 3: Get videos to watch
-    const videos = getVideosForProfile(profileId, schedule);
-    console.log(`[Agent ${index + 1}] Videos to watch: ${videos.length}`);
-
-    // Step 4: Watch each video with delay between them
-    for (let vi = 0; vi < videos.length; vi++) {
-      const video = videos[vi];
-      const tabDelay = randomDelay(schedule.tabDelayMin * 1000, schedule.tabDelayMax * 1000);
-
-      if (vi > 0) {
-        console.log(`[Agent ${index + 1}] Waiting ${Math.round(tabDelay / 1000)}s before next video...`);
-        await sleep(tabDelay);
-      }
-
-      if (video.mode === 'url') {
-        await agent.watchByUrl(video.value);
-      } else {
-        // Find channel name for search context
-        const channelName = video.channelName || '';
-        await agent.searchAndWatch(video.value, channelName);
-      }
-    }
-
-    // Step 5: Done — disconnect Playwright AND close browser profile
-    await agent.disconnect();
-    activeAgents.delete(profileId);
-
-    // Close browser to free RAM
-    try {
-      const provider = providerFactory.getProvider();
-      await provider.stopProfile(profileId);
-      console.log(`[Agent ${index + 1}] ✅ All videos watched! Browser closed.`);
-    } catch (closeErr) {
-      console.log(`[Agent ${index + 1}] ✅ Videos done. Browser close failed: ${closeErr.message}`);
-    }
-
-  } catch (err) {
-    console.error(`[Agent ${index + 1}] Error: ${err.message}`);
-    activeAgents.delete(profileId);
-    // Try to close browser even on error
-    try {
-      const provider = providerFactory.getProvider();
-      await provider.stopProfile(profileId);
-    } catch {}
-  }
-}
-
-// Get videos assigned to a profile from schedule
-function getVideosForProfile(profileId, schedule) {
-  const videos = [];
-
-  if (schedule.assignmentMode === 'same-all') {
-    for (const cs of (schedule.sameForAll || [])) {
-      const channelName = cs.channelName || '';
-      for (const v of cs.videos) {
-        videos.push({ ...v, channelName });
-      }
-    }
-  } else {
-    const pa = (schedule.perProfile || []).find(p => p.profileId === profileId);
-    if (pa) {
-      for (const cs of pa.channelSelections) {
-        const channelName = cs.channelName || '';
-        for (const v of cs.videos) {
-          videos.push({ ...v, channelName });
-        }
-      }
-    }
-  }
-
-  return videos;
-}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // HELPERS
@@ -2194,7 +2262,63 @@ app.post('/api/settings/test/multilogin', async (req, res) => {
 // START SERVER
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-app.listen(PORT, () => {
+let shuttingDown = false;
+
+async function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal} — shutting down gracefully...`);
+
+  try {
+    clearInterval(_ramWarnIntervalId);
+    clearInterval(_analyticsDailyInterval);
+    clearInterval(_scheduledJobsTickerId);
+  } catch (timerErr) {
+    console.error('[shutdown] clear timers:', timerErr.message);
+  }
+
+  try {
+    orchestrator.stopAll();
+  } catch (ochErr) {
+    console.error('[shutdown] orchestrator.stopAll:', ochErr.message);
+  }
+
+  try {
+    await agentManager.stopAll();
+  } catch (amErr) {
+    console.error('[shutdown] agentManager.stopAll:', amErr.message);
+  }
+
+  const disconnectAgents = [...activeAgents.entries()];
+  activeAgents.clear();
+  for (const [, ag] of disconnectAgents) {
+    try {
+      if (ag && ag._cleanupTimer) clearTimeout(ag._cleanupTimer);
+      await ag.disconnect();
+    } catch (disconnectErr) {
+      console.error('[shutdown] ProfileAgent.disconnect:', disconnectErr.message);
+    }
+  }
+
+  try {
+    await analyticsStore.flushPending();
+  } catch (flushErr) {
+    console.error('[shutdown] analytics flush:', flushErr.message);
+  }
+
+  saveWatchHistory(watchHistory);
+
+  server.close((closeErr) => {
+    if (closeErr) {
+      console.error('[shutdown] server.close:', closeErr.message);
+    } else {
+      console.log('[shutdown] HTTP server closed');
+    }
+    process.exit(closeErr ? 1 : 0);
+  });
+}
+
+const server = app.listen(PORT, () => {
   const providerName = (process.env.BROWSER_PROVIDER || 'morelogin').toUpperCase();
   console.log(`\n🤖 MMB-AGENT Backend Server running on http://localhost:${PORT}`);
   console.log(`   Browser Provider: ${providerName}`);
@@ -2214,4 +2338,11 @@ app.listen(PORT, () => {
   console.log(`     POST /api/update/run`);
   console.log(`     POST /api/update/push`);
   console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+});
+
+process.on('SIGTERM', () => {
+  void gracefulShutdown('SIGTERM');
+});
+process.on('SIGINT', () => {
+  void gracefulShutdown('SIGINT');
 });

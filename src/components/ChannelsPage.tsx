@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Plus, RefreshCw, CheckCircle, XCircle, Search } from 'lucide-react';
+import { Plus, RefreshCw, CheckCircle, XCircle, Search, Bell, X, ExternalLink, Zap, Play } from 'lucide-react';
 import type { Channel, AutoSync, ChannelStatus } from '../store/useChannelStore';
 import ChannelCard from './ChannelCard';
 import AddChannelModal from './AddChannelModal';
@@ -8,6 +8,8 @@ import PlaylistModal from './PlaylistModal';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import VideoListPanel from './VideoListPanel';
 import { isPermanentChannel } from '../data/defaultChannels';
+import { getMonitorConfig, setMonitorConfig } from '../utils/videoMonitorStore';
+import type { UseVideoMonitorReturn } from '../hooks/useVideoMonitor';
 interface ChannelsPageProps {
   channels: Channel[];
   getChannels: () => (Channel & { total_videos: number; enabled_videos: number; new_videos: number })[];
@@ -30,6 +32,7 @@ interface ChannelsPageProps {
   toasts: { id: string; message: string; type: 'success' | 'error' | 'info' }[];
   dismissToast: (id: string) => void;
   forceSyncToServer?: () => Promise<boolean>;
+  videoMonitor?: UseVideoMonitorReturn;
 }
 
 export default function ChannelsPage({
@@ -54,15 +57,20 @@ export default function ChannelsPage({
   toasts,
   dismissToast,
   forceSyncToServer,
+  videoMonitor,
 }: ChannelsPageProps) {
   const [search, setSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  // Force re-render when monitor toggles change (stored in localStorage)
+  const [monitorTick, setMonitorTick] = useState(0);
+  function refreshMonitor() { setMonitorTick(t => t + 1); }
   const [editChannelId, setEditChannelId] = useState<number | null>(null);
   const [playlistChannelId, setPlaylistChannelId] = useState<number | null>(null);
   const [deleteChannelId, setDeleteChannelId] = useState<number | null>(null);
   const [expandedChannelId, setExpandedChannelId] = useState<number | null>(null);
 
-  const enrichedChannels = useMemo(() => getChannels(), [getChannels]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const enrichedChannels = useMemo(() => getChannels(), [getChannels, monitorTick]);
 
   const totalChannels = enrichedChannels.length;
   const activeChannels = enrichedChannels.filter(ch => ch.status === 'active').length;
@@ -163,6 +171,72 @@ export default function ChannelsPage({
         </div>
       </div>
 
+      {/* ━━━ NEW VIDEO NOTIFICATIONS ━━━ */}
+      {videoMonitor && videoMonitor.notifications.filter(n => !n.dismissed).length > 0 && (
+        <div className="px-6 pt-4 space-y-2 flex-shrink-0">
+          {videoMonitor.notifications.filter(n => !n.dismissed).map(notif => (
+            <div key={notif.id}
+              className="flex items-center gap-3 bg-red-950/40 border border-red-500/40 rounded-2xl px-4 py-3 shadow-lg">
+              {/* Thumbnail */}
+              {notif.thumbnail && (
+                <img src={notif.thumbnail} alt="" className="w-16 h-10 rounded-lg object-cover flex-shrink-0 border border-gray-700" />
+              )}
+              {/* Info */}
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-red-400 bg-red-900/40 px-2 py-0.5 rounded-full border border-red-700/40 animate-pulse">
+                    🆕 New Video
+                  </span>
+                  <span className="text-[10px] text-gray-500">{notif.channelName}</span>
+                  <span className="text-[10px] text-gray-600 ml-auto">
+                    {new Date(notif.detectedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+                <p className="text-sm text-white font-medium truncate">{notif.videoTitle}</p>
+              </div>
+              {/* Actions */}
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <a
+                  href={notif.videoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-gray-800 border border-gray-700 text-gray-300 text-xs hover:border-gray-500 hover:text-white transition-all"
+                >
+                  <ExternalLink size={11} /> Open
+                </a>
+                {!notif.engagementStarted && (
+                  <button
+                    onClick={() => videoMonitor.markEngaged(notif.id)}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-green-700/80 text-white text-xs font-medium hover:bg-green-600 transition-all"
+                  >
+                    <Zap size={11} /> Start Engagement
+                  </button>
+                )}
+                {notif.engagementStarted && (
+                  <span className="text-xs text-green-400 flex items-center gap-1">
+                    <Play size={10} /> Queued
+                  </span>
+                )}
+                <button
+                  onClick={() => videoMonitor.dismissNotif(notif.id)}
+                  className="w-6 h-6 flex items-center justify-center rounded-lg bg-gray-800 border border-gray-700 text-gray-500 hover:text-gray-300 transition-all"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            </div>
+          ))}
+          {videoMonitor.notifications.filter(n => !n.dismissed).length > 1 && (
+            <div className="flex justify-end">
+              <button onClick={videoMonitor.clearAll}
+                className="text-xs text-gray-600 hover:text-gray-400 underline">
+                Dismiss all
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ━━━ CHANNEL CARDS LIST ━━━ */}
       <div className="flex-1 overflow-y-auto p-6">
         {filtered.length === 0 ? (
@@ -188,7 +262,9 @@ export default function ChannelsPage({
           </div>
         ) : (
           <div className="space-y-4">
-            {filtered.map(channel => (
+            {filtered.map(channel => {
+              const monCfg = getMonitorConfig(channel.channel_id);
+              return (
               <div key={channel.id}>
                 <ChannelCard
                   channel={channel}
@@ -201,6 +277,70 @@ export default function ChannelsPage({
                   onCardClick={() => handleCardClick(channel.id)}
                   isExpanded={expandedChannelId === channel.id}
                 />
+
+                {/* ── Monitor settings row (below card, always visible) ── */}
+                <div className={`mx-0.5 -mt-1 rounded-b-2xl border-x border-b px-4 py-2.5 flex items-center gap-3 transition-all ${
+                  monCfg.enabled
+                    ? 'bg-red-950/20 border-red-500/25'
+                    : 'bg-gray-900/60 border-gray-800/60'
+                }`}>
+                  <Bell size={13} className={monCfg.enabled ? 'text-red-400' : 'text-gray-600'} />
+                  <span className={`text-xs font-medium ${monCfg.enabled ? 'text-red-300' : 'text-gray-600'}`}>
+                    New video monitor
+                  </span>
+                  {/* Enabled toggle */}
+                  <button
+                    onClick={() => { setMonitorConfig(channel.channel_id, { enabled: !monCfg.enabled }); refreshMonitor(); }}
+                    className={`relative w-9 h-4.5 h-[18px] rounded-full transition-all duration-200 flex-shrink-0 ${
+                      monCfg.enabled ? 'bg-red-500' : 'bg-gray-700 hover:bg-gray-600'
+                    }`}
+                  >
+                    <span className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-all duration-200 ${
+                      monCfg.enabled ? 'left-[18px]' : 'left-0.5'
+                    }`} />
+                  </button>
+
+                  {monCfg.enabled && (
+                    <>
+                      <div className="w-px h-3 bg-gray-700" />
+                      {/* Auto-engage toggle */}
+                      <div className="flex items-center gap-2">
+                        <Zap size={11} className={monCfg.autoEngage ? 'text-yellow-400' : 'text-gray-600'} />
+                        <span className={`text-xs ${monCfg.autoEngage ? 'text-yellow-300' : 'text-gray-600'}`}>
+                          Auto engagement
+                        </span>
+                        <button
+                          onClick={() => { setMonitorConfig(channel.channel_id, { autoEngage: !monCfg.autoEngage }); refreshMonitor(); }}
+                          className={`relative w-9 h-[18px] rounded-full transition-all duration-200 flex-shrink-0 ${
+                            monCfg.autoEngage ? 'bg-yellow-500' : 'bg-gray-700 hover:bg-gray-600'
+                          }`}
+                        >
+                          <span className={`absolute top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow transition-all duration-200 ${
+                            monCfg.autoEngage ? 'left-[18px]' : 'left-0.5'
+                          }`} />
+                        </button>
+                      </div>
+                      <div className="w-px h-3 bg-gray-700" />
+                      {/* Manual force check */}
+                      {videoMonitor && (
+                        <button
+                          onClick={() => void videoMonitor.forceCheck()}
+                          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition-all"
+                        >
+                          <RefreshCw size={10} /> Check now
+                        </button>
+                      )}
+                      <span className="ml-auto text-[10px] text-gray-700">
+                        Checks every 5 min
+                      </span>
+                    </>
+                  )}
+
+                  {!monCfg.enabled && (
+                    <span className="ml-auto text-[10px] text-gray-700">Off</span>
+                  )}
+                </div>
+
                 {/* Expandable Video List Panel */}
                 {expandedChannelId === channel.id && (
                   <VideoListPanel
@@ -212,7 +352,8 @@ export default function ChannelsPage({
                   />
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
