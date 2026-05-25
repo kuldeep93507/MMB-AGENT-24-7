@@ -404,8 +404,7 @@ export default function SchedulerPage({ profiles, sites }: SchedulerPageProps) {
                           </button>
                         ) : (
                           <button onClick={() => handleRun(s.id)} title="Run Now"
-                            disabled={s.status === 'running'}
-                            className="bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white px-3 py-2 rounded-xl text-sm transition-all">
+                            className="bg-green-700 hover:bg-green-600 text-white px-3 py-2 rounded-xl text-sm transition-all">
                             <Play size={14} />
                           </button>
                         )}

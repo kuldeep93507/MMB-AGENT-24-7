@@ -28,7 +28,7 @@ function moreloginRequest(apiPath: string, method: string, body?: string): Promi
       timeout: 60000,
     };
     if (body) {
-      options.headers!['Content-Length'] = Buffer.byteLength(body).toString();
+      (options.headers as Record<string, string>)['Content-Length'] = Buffer.byteLength(body).toString();
     }
 
     const req = http.request(options, (res) => {
@@ -83,7 +83,7 @@ export default defineConfig({
                 headers: { 'Content-Type': 'application/json' },
                 timeout: 60000,
               };
-              if (payload) options.headers!['Content-Length'] = Buffer.byteLength(payload).toString();
+              if (payload) (options.headers as Record<string, string>)['Content-Length'] = Buffer.byteLength(payload).toString();
 
               const proxyReq = http.request(options, (proxyRes) => {
                 let data = '';

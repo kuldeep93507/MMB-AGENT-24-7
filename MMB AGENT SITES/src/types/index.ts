@@ -1,7 +1,7 @@
 export type OS = 'Windows' | 'Android' | 'macOS';
 export type MultiloginProxyType = 'multilogin_residential' | 'smartproxy' | 'none';
 export type ProfileStatus = 'running' | 'stopped' | 'starting' | 'error' | 'recreating';
-export type ProxyLife = '1hr' | '2hr' | '4hr' | '8hr' | '24hr';
+export type ProxyLife = '1hr' | '2hr' | '4hr' | '8hr' | '24hr' | 'unknown';
 export type JobStatus = 'pending' | 'running' | 'done' | 'failed';
 export type TaskType = 'read_article' | 'comment' | 'search_google' | 'internal_nav' | 'backlink_visit' | 'idle';
 export type TrafficSource = 'google' | 'bing' | 'duckduckgo' | 'yahoo' | 'direct' | 'internal' | 'backlink' | 'random';

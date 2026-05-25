@@ -398,24 +398,9 @@ app.post('/api/read-history/check', (req, res) => {
 
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// SCHEDULER RUN (Staggered + Profile Close)
+// PROFILE TASK RUNNER — module-level so recycle loop can call it too
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-app.post('/api/scheduler/run', async (req, res) => {
-  const schedule = req.body;
-  if (!schedule) return res.status(400).json({ error: 'Schedule data required' });
-
-  const scheduleId = schedule.id || Date.now().toString();
-  const provider = schedule.provider || 'morelogin';
-  cancelledSchedules.delete(scheduleId); // clear any stale cancel flag
-
-  console.log(`\n━━━ Starting Schedule: ${schedule.name || 'Unnamed'} [${provider}] ━━━`);
-  runningSchedules.set(scheduleId, { schedule, status: 'running', startedAt: Date.now(), progress: [] });
-
-  const profiles = schedule.selectedProfiles || schedule.assignments?.map(a => a.profileId) || [];
-  console.log(`Profiles: ${profiles.length}`);
-
-  // Helper: run a single profile through its articles
-  async function runProfileTask(profileId, scheduleId, schedule, provider) {
+async function runProfileTask(profileId, scheduleId, schedule, provider) {
     const progressEntry = { profileId, status: 'starting', startedAt: Date.now(), articlesRead: 0 };
     const existing = runningSchedules.get(scheduleId);
     if (existing) existing.progress.push(progressEntry);
@@ -538,7 +523,24 @@ app.post('/api/scheduler/run', async (req, res) => {
       } catch {}
     }
     progressEntry.completedAt = Date.now();
-  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SCHEDULER RUN (Staggered + Profile Close)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.post('/api/scheduler/run', async (req, res) => {
+  const schedule = req.body;
+  if (!schedule) return res.status(400).json({ error: 'Schedule data required' });
+
+  const scheduleId = schedule.id || Date.now().toString();
+  const provider = schedule.provider || 'morelogin';
+  cancelledSchedules.delete(scheduleId);
+
+  console.log(`\n━━━ Starting Schedule: ${schedule.name || 'Unnamed'} [${provider}] ━━━`);
+  runningSchedules.set(scheduleId, { schedule, status: 'running', startedAt: Date.now(), progress: [] });
+
+  const profiles = schedule.selectedProfiles || schedule.assignments?.map(a => a.profileId) || [];
+  console.log(`Profiles: ${profiles.length}`);
 
   const concurrent = schedule.concurrent !== false; // default: all profiles run in parallel
   // Max profiles running at same time — prevents launcher from being overwhelmed
@@ -1460,6 +1462,448 @@ function startCronIfEnabled() {
 
 // Re-apply cron whenever settings change
 const _origSettingsPost = app._router.stack.find(l => l.route?.path === '/api/settings' && l.route.methods.post);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// WORKERS API — for MonitorPage
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.get('/api/workers', (req, res) => {
+  const workers = [];
+  const statusMap = {};
+  for (const [id, agent] of activeAgents) {
+    try { statusMap[id] = agent.getStatus(); } catch {}
+  }
+  // Build worker list from orchestrator + activeAgents
+  const orch = orchestrator.getStatus ? orchestrator.getStatus() : {};
+  const allIds = new Set([...Object.keys(statusMap), ...Object.keys(orch)]);
+  for (const profileId of allIds) {
+    const st = statusMap[profileId] || orch[profileId] || {};
+    workers.push({
+      profileId,
+      status: st.status || 'stopped',
+      currentVideo: st.currentArticle || st.currentUrl || null,
+      progress: st.progress || '0/0',
+      retries: st.retries || 0,
+      logs: st.logs || [],
+      results: st.results || null,
+      uptime: st.uptimeMs || 0,
+    });
+  }
+  const running = workers.filter(w => ['running','watching','searching','waiting','starting','connecting'].includes(w.status)).length;
+  const done    = workers.filter(w => w.status === 'done').length;
+  const error   = workers.filter(w => w.status === 'error').length;
+  const waiting = workers.filter(w => w.status === 'waiting').length;
+  res.json({ workers, stats: { total: workers.length, running, done, error, waiting } });
+});
+
+app.post('/api/workers/stop/:profileId', (req, res) => {
+  const { profileId } = req.params;
+  orchestrator.stopWorker(profileId);
+  res.json({ success: true });
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 24/7 RECYCLE LOOP
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+let recycleState = {
+  enabled: false,
+  isPaused: false,
+  slots: [],
+  articles: [],         // global article pool sent from frontend
+  startedAt: null,
+  cycleCount: 0,
+  cooldownMinutes: 10,  // configurable cooldown between cycles
+};
+
+// Per-slot automation loop — runs indefinitely until stopped
+async function runRecycleSlot(slotId) {
+  console.log(`[Recycle] Slot ${slotId} loop started`);
+
+  while (recycleState.enabled) {
+    const slot = recycleState.slots.find(s => s.slotId === slotId);
+    if (!slot || !slot.enabled) break;
+
+    // Wait while paused
+    while (recycleState.enabled && slot.isPaused) {
+      await sleep(3000);
+    }
+    if (!recycleState.enabled || !slot.enabled) break;
+
+    slot.status = 'running';
+
+    try {
+      // Pick random articles from the global pool
+      const pool = recycleState.articles || [];
+      if (pool.length === 0) {
+        console.log(`[Recycle] Slot ${slotId} — no articles, waiting 60s`);
+        slot.status = 'idle';
+        await sleep(60000);
+        continue;
+      }
+
+      const count = slot.videoCount || 3;
+      const picked = [...pool].sort(() => Math.random() - 0.5).slice(0, Math.min(count, pool.length));
+      const scheduleId = `recycle_${slotId}_${Date.now()}`;
+      cancelledSchedules.delete(scheduleId);
+
+      const schedule = {
+        id: scheduleId,
+        name: `24/7 Recycle — ${slot.profileName}`,
+        provider: appSettings.lastProvider || 'morelogin',
+        selectedProfiles: [slot.currentProfileId],
+        assignments: [{ profileId: slot.currentProfileId, articles: picked }],
+        articlesPerSession: count,
+        trafficSource: 'random',
+        readTimeMin: 30,
+        readTimeMax: 180,
+        scrollSpeed: 'medium',
+        articleDelayMin: 15,
+        articleDelayMax: 45,
+        useNextPost: true,
+      };
+
+      runningSchedules.set(scheduleId, { schedule, status: 'running', startedAt: Date.now(), progress: [] });
+      console.log(`[Recycle] Slot ${slotId} — cycle #${(slot.cycleCount||0)+1} for ${slot.profileName} (${picked.length} articles)`);
+
+      await runProfileTask(slot.currentProfileId, scheduleId, schedule, schedule.provider);
+
+      slot.cycleCount = (slot.cycleCount || 0) + 1;
+      recycleState.cycleCount = (recycleState.cycleCount || 0) + 1;
+      slot.lastError = null;
+      runningSchedules.set(scheduleId, { ...runningSchedules.get(scheduleId), status: 'completed', completedAt: Date.now() });
+      console.log(`[Recycle] Slot ${slotId} cycle done. Total cycles: ${recycleState.cycleCount}`);
+
+    } catch (err) {
+      slot.status = 'error';
+      slot.lastError = err.message;
+      console.error(`[Recycle] Slot ${slotId} error: ${err.message}`);
+    }
+
+    if (!recycleState.enabled || !slot.enabled) break;
+
+    // Cooldown between cycles — use configured value (default 10 min)
+    const cooldownMins = recycleState.cooldownMinutes || 10;
+    const cooldownMs = cooldownMins * 60 * 1000;
+    slot.status = 'cooldown';
+    slot.cooldownUntil = Date.now() + cooldownMs;
+    console.log(`[Recycle] Slot ${slotId} cooldown ${Math.round(cooldownMs/60000)}min`);
+
+    const cooldownEnd = slot.cooldownUntil;
+    while (Date.now() < cooldownEnd && recycleState.enabled && slot.enabled) {
+      if (slot.isPaused) slot.cooldownUntil = Date.now() + 5000; // freeze timer while paused
+      await sleep(4000);
+    }
+    slot.cooldownUntil = null;
+  }
+
+  const slot = recycleState.slots.find(s => s.slotId === slotId);
+  if (slot) { slot.status = 'stopped'; slot.enabled = false; }
+  console.log(`[Recycle] Slot ${slotId} loop ended`);
+}
+
+app.get('/api/recycle/status', (req, res) => {
+  res.json({
+    enabled:    recycleState.enabled,
+    isPaused:   recycleState.isPaused,
+    slots:      recycleState.slots,
+    startedAt:  recycleState.startedAt,
+    cycleCount: recycleState.cycleCount,
+  });
+});
+
+app.post('/api/recycle/start', (req, res) => {
+  const { slots, articles, provider, cooldownMinutes } = req.body;
+  if (!slots || !slots.length) return res.status(400).json({ error: 'slots required' });
+
+  // Stop any existing loop first
+  recycleState.enabled = false;
+  if (provider) appSettings.lastProvider = provider;
+
+  recycleState = {
+    enabled: true,
+    isPaused: false,
+    startedAt: Date.now(),
+    cycleCount: 0,
+    articles: Array.isArray(articles) ? articles : [],
+    cooldownMinutes: (cooldownMinutes && cooldownMinutes > 0) ? Number(cooldownMinutes) : 10,
+    slots: slots.map(s => ({
+      slotId: s.slotId || `slot-${Math.random().toString(36).slice(2, 8)}`,
+      currentProfileId: s.profileId,
+      profileName: s.profileName || s.profileId,
+      status: 'running',
+      enabled: true,
+      cooldownUntil: null,
+      cycleCount: 0,
+      lastError: null,
+      isPaused: false,
+      videoCount: s.articleCount || s.videoCount || 3,
+    })),
+  };
+
+  console.log(`[Recycle] Started: ${recycleState.slots.length} slots, ${recycleState.articles.length} articles in pool`);
+
+  // Fire background loop per slot
+  for (const slot of recycleState.slots) {
+    runRecycleSlot(slot.slotId).catch(e => console.error(`[Recycle] slot ${slot.slotId} crashed: ${e.message}`));
+  }
+
+  res.json({ success: true, slots: recycleState.slots.length, articles: recycleState.articles.length });
+});
+
+app.post('/api/recycle/stop', (req, res) => {
+  recycleState.enabled = false;
+  recycleState.isPaused = false;
+  recycleState.slots = recycleState.slots.map(s => ({ ...s, status: 'stopped', enabled: false }));
+  res.json({ success: true });
+});
+
+app.post('/api/recycle/pause', (req, res) => {
+  recycleState.isPaused = true;
+  recycleState.slots = recycleState.slots.map(s => ({ ...s, isPaused: true }));
+  res.json({ success: true });
+});
+
+app.post('/api/recycle/resume', (req, res) => {
+  recycleState.isPaused = false;
+  recycleState.slots = recycleState.slots.map(s => ({ ...s, isPaused: false }));
+  res.json({ success: true });
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ENGAGEMENT QUEUE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+// In-memory engagement job queue
+let engagementJobs = []; // { id, profileId, profileName, browserType, status, scheduledAt, actions, articles, commentText, watchPct, log, error }
+
+function engLog(jobId, msg) {
+  const job = engagementJobs.find(j => j.id === jobId);
+  if (job) { job.log.push({ t: Date.now(), msg }); console.log(`[Engagement ${jobId.slice(-6)}] ${msg}`); }
+}
+
+async function runEngagementJob(job) {
+  job.status = 'running';
+  engLog(job.id, `▶ Starting engagement for ${job.profileName}`);
+
+  try {
+    // ── 1. Launch profile via existing infrastructure (handles MoreLogin/Multilogin/AdsPower) ──
+    const provider = (job.browserType || 'morelogin').toLowerCase();
+    const debugPort = await launchQueue.run(() => startProfileForSchedule(job.profileId, provider));
+    if (!debugPort) throw new Error('Could not start browser profile — check provider settings');
+    engLog(job.id, `🔗 Browser on CDP port ${debugPort}`);
+
+    // ── 2. Connect Playwright CDP ──────────────────────────────────────
+    const { chromium } = require('playwright-core');
+    const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debugPort}`, { timeout: 30000 });
+    const contexts = browser.contexts();
+    const ctx = contexts[0] || await browser.newContext();
+    engLog(job.id, `✅ Playwright connected`);
+
+    // ── 3. Visit each article ────────────────────────────────────────
+    for (const article of job.articles) {
+      try {
+        engLog(job.id, `📄 Opening: ${article.title || article.url}`);
+        const page = await ctx.newPage();
+
+        await page.goto(article.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForTimeout(2000 + Math.random() * 2000);
+
+        // Smooth scroll to simulate human reading
+        if (job.actions.scrollToBottom) {
+          engLog(job.id, `📜 Scrolling article...`);
+          const totalHeight = await page.evaluate(() => document.body.scrollHeight);
+          const steps = 10 + Math.floor(Math.random() * 8);
+          for (let i = 1; i <= steps; i++) {
+            await page.evaluate((y) => window.scrollTo({ top: y, behavior: 'smooth' }), Math.floor((totalHeight / steps) * i));
+            await page.waitForTimeout(600 + Math.random() * 1400);
+          }
+        } else {
+          // Minimum dwell time even without scroll
+          await page.waitForTimeout(30000 + Math.random() * 30000);
+        }
+
+        // Click 1-2 internal links (navigates within same tab)
+        if (job.actions.clickLinks) {
+          try {
+            const origin = new URL(article.url).origin;
+            const links = await page.$$eval(
+              'article a[href], .post-content a[href], .entry-content a[href], .the-content a[href], .article-body a[href]',
+              (els, base) => els.map(a => a.href).filter(h => h.startsWith(base) && !h.includes('#') && !h.endsWith('/')).slice(0, 2),
+              origin
+            );
+            for (const link of links) {
+              engLog(job.id, `🔗 Visiting: ${link.slice(0, 70)}`);
+              await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 15000 });
+              await page.waitForTimeout(5000 + Math.random() * 5000);
+            }
+            // Navigate back to original article for comment/share
+            if (links.length > 0) {
+              await page.goto(article.url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+              await page.waitForTimeout(2000);
+            }
+          } catch {}
+        }
+
+        // Type comment in WordPress comment box (don't submit)
+        if (job.actions.comment && job.commentText) {
+          try {
+            const box = await page.$('#comment, textarea[name="comment"], .comment-form textarea, [name="comment"]');
+            if (box) {
+              await box.scrollIntoViewIfNeeded();
+              await box.click();
+              await box.fill('');
+              for (const ch of job.commentText) {
+                await box.type(ch, { delay: 35 + Math.random() * 80 });
+              }
+              engLog(job.id, `💬 Comment typed (not submitted)`);
+            }
+          } catch {}
+        }
+
+        // Click Twitter share button
+        if (job.actions.shareTwitter) {
+          try {
+            const tBtn = await page.$('a[href*="twitter.com/share"], a[href*="twitter.com/intent"], .share-twitter, [data-network="twitter"], .twitter-share');
+            if (tBtn) { await tBtn.click(); await page.waitForTimeout(1200); engLog(job.id, `🐦 Twitter share clicked`); }
+          } catch {}
+        }
+
+        await page.waitForTimeout(1000 + Math.random() * 1500);
+        await page.close();
+        engLog(job.id, `✅ Done: ${article.title || article.url}`);
+      } catch (artErr) {
+        engLog(job.id, `⚠️ Article error: ${artErr.message}`);
+      }
+    }
+
+    engLog(job.id, `🎉 Engagement complete for ${job.profileName}`);
+    job.status = 'done';
+
+    // ── 4. Clean up ───────────────────────────────────────────────────
+    try { await browser.close(); } catch {}
+    await closeProfileForSchedule(job.profileId, provider);
+
+  } catch (err) {
+    job.status = 'failed';
+    job.error = err.message;
+    engLog(job.id, `❌ Failed: ${err.message}`);
+    await closeProfileForSchedule(job.profileId, job.browserType || 'morelogin').catch(() => {});
+  }
+}
+
+// Process queue — max 3 concurrent jobs
+async function processEngagementQueue() {
+  const pending = engagementJobs.filter(j => j.status === 'pending');
+  const running = engagementJobs.filter(j => j.status === 'running').length;
+  const slots = Math.max(0, 3 - running);
+  const toStart = pending.slice(0, slots);
+  for (const job of toStart) {
+    runEngagementJob(job).catch(() => {}); // fire and forget
+  }
+}
+
+// Queue processor — check every 5s
+setInterval(processEngagementQueue, 5000);
+
+// POST /api/engagement/start
+app.post('/api/engagement/start', (req, res) => {
+  const { profiles: profileJobs } = req.body;
+  if (!Array.isArray(profileJobs) || !profileJobs.length) {
+    return res.status(400).json({ success: false, error: 'profiles array required' });
+  }
+  const created = [];
+  for (const pj of profileJobs) {
+    // Respect delayMs — schedule job in future via setTimeout
+    const job = {
+      id: Math.random().toString(36).slice(2) + Date.now().toString(36),
+      profileId:   pj.profileId,
+      profileName: pj.profileName || pj.profileId,
+      browserType: pj.browserType || 'morelogin',
+      status:      'pending',
+      scheduledAt: Date.now() + (pj.delayMs || 0),
+      actions:     pj.actions || {},
+      articles:    pj.articles || [],
+      commentText: pj.commentText || '',
+      watchPct:    pj.watchPct || 80,
+      log:         [],
+      error:       null,
+    };
+    engagementJobs.push(job);
+    // Delay start if delayMs > 0
+    if (pj.delayMs && pj.delayMs > 0) {
+      setTimeout(() => processEngagementQueue(), pj.delayMs);
+    }
+    created.push(job.id);
+  }
+  // Kick off processor
+  setTimeout(processEngagementQueue, 500);
+  res.json({ success: true, jobIds: created, total: created.length });
+});
+
+// GET /api/engagement/status
+app.get('/api/engagement/status', (req, res) => {
+  const jobs = engagementJobs;
+  res.json({
+    total:   jobs.length,
+    pending: jobs.filter(j => j.status === 'pending').length,
+    running: jobs.filter(j => j.status === 'running').length,
+    done:    jobs.filter(j => j.status === 'done').length,
+    failed:  jobs.filter(j => j.status === 'failed').length,
+    jobs:    jobs.map(j => ({
+      id:          j.id,
+      profileId:   j.profileId,
+      profileName: j.profileName,
+      status:      j.status,
+      scheduledAt: j.scheduledAt,
+      actions:     j.actions,
+      articles:    j.articles,
+      log:         j.log.slice(-20), // last 20 log entries
+      error:       j.error,
+    })),
+  });
+});
+
+// POST /api/engagement/cancel
+app.post('/api/engagement/cancel', (req, res) => {
+  engagementJobs = engagementJobs.map(j =>
+    j.status === 'pending' ? { ...j, status: 'cancelled' } : j
+  );
+  res.json({ success: true });
+});
+
+// POST /api/engagement/clear
+app.post('/api/engagement/clear', (req, res) => {
+  engagementJobs = engagementJobs.filter(j => j.status === 'pending' || j.status === 'running');
+  res.json({ success: true });
+});
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// NOTIFICATIONS — Telegram + Email
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+app.post('/api/notify/test', async (req, res) => {
+  const { type } = req.body;
+  const settings = appSettings;
+  if (type === 'telegram') {
+    if (!settings.telegramBotToken || !settings.telegramChatId) {
+      return res.json({ ok: false, message: 'Telegram Bot Token or Chat ID not configured' });
+    }
+    try {
+      const r = await fetch(
+        `https://api.telegram.org/bot${settings.telegramBotToken}/sendMessage`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: settings.telegramChatId, text: '✅ MMB AGENT SITES — Telegram notification test successful!' }) }
+      );
+      const d = await r.json();
+      if (d.ok) return res.json({ ok: true, message: 'Telegram message sent successfully!' });
+      return res.json({ ok: false, message: d.description || 'Telegram API error' });
+    } catch (err) {
+      return res.json({ ok: false, message: 'Request failed: ' + err.message });
+    }
+  }
+  if (type === 'email') {
+    return res.json({ ok: false, message: 'Email test not yet implemented — configure SMTP and try again' });
+  }
+  res.status(400).json({ ok: false, message: 'Unknown notification type' });
+});
 
 // POST /api/cron/toggle — enable or disable cron
 app.post('/api/cron/toggle', (req, res) => {
