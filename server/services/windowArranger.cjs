@@ -52,21 +52,36 @@ async function arrangeWindowAtPort(cdpPort, index, total, screenW = 1920, screen
 
 /**
  * Arrange profile windows by CDP port list.
+ * Reads windowWidth/windowHeight from user-settings.json if not provided.
  * @param {Array<{ profileId: string, cdpPort: number }>} entries
  */
-async function arrangeProfilesGrid(entries, screenW = 1920, screenH = 1080) {
+async function arrangeProfilesGrid(entries, screenW, screenH) {
+  // Load from settings if not explicitly passed
+  if (!screenW || !screenH) {
+    const res = loadWindowResolution();
+    screenW = screenW || res.width;
+    screenH = screenH || res.height;
+  }
+  console.log(`[Window] Auto-arrange using ${screenW}x${screenH}`);
+
   const list = (entries || []).filter((e) => e && e.cdpPort);
   const results = [];
   for (let i = 0; i < list.length; i++) {
     const { profileId, cdpPort } = list[i];
     try {
       const r = await arrangeWindowAtPort(cdpPort, i, list.length, screenW, screenH);
+      if (r.ok) {
+        console.log(`[Window] Resolution applied: ${r.width}x${r.height} at (${r.x},${r.y}) for ${profileId.slice(0, 8)}…`);
+      } else {
+        console.warn(`[Window] Auto-arrange skipped/failed: ${r.error} for ${profileId.slice(0, 8)}…`);
+      }
       results.push({
         profileId,
         status: r.ok ? 'ok' : 'error',
         action: r.ok ? `arranged at ${r.x},${r.y} (${r.width}x${r.height})` : r.error,
       });
     } catch (err) {
+      console.warn(`[Window] Auto-arrange skipped/failed: ${err.message} for ${profileId.slice(0, 8)}…`);
       results.push({ profileId, status: 'error', action: err.message });
     }
   }
@@ -96,10 +111,27 @@ function loadAutoArrangeSetting() {
   }
 }
 
+/** Read windowWidth/windowHeight from user-settings.json (defaults: 1920x1080). */
+function loadWindowResolution() {
+  try {
+    const settingsFile = path.join(__dirname, '..', '..', 'user-settings.json');
+    if (!fs.existsSync(settingsFile)) return { width: 1920, height: 1080 };
+    const s = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    const w = parseInt(s.windowWidth, 10);
+    const h = parseInt(s.windowHeight, 10);
+    const width  = Number.isFinite(w) && w >= 800  ? w : 1920;
+    const height = Number.isFinite(h) && h >= 600  ? h : 1080;
+    return { width, height };
+  } catch {
+    return { width: 1920, height: 1080 };
+  }
+}
+
 module.exports = {
   arrangeProfilesGrid,
   arrangeWindowAtPort,
   resolveRunningFromCache,
   loadAutoArrangeSetting,
+  loadWindowResolution,
   readCdpCache,
 };

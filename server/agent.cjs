@@ -14,7 +14,7 @@
 const { chromium } = require('playwright-core');
 const http = require('http');
 const { URL } = require('url');
-const { openVideoSmart, openVideoViaBacklink, assignTrafficSource } = require('./searchEngine.cjs');
+const { openVideoSmart, openVideoViaBacklink, assignTrafficSource, runSearchWarmup } = require('./searchEngine.cjs');
 const {
   getInternalApiBaseUrl,
   getAnalyticsTrackMaxRetries,
@@ -280,6 +280,8 @@ VideoWatcher.setBehaviorHelpers({
   seekForwardKeyboard,
   isMobileYouTube,
   trackEngagement,
+  ensureAutoplayOff,
+  verifyAutoplayOff,
 });
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -962,6 +964,16 @@ class ProfileAgent {
         if (!(await this.ensurePageNotBlocked(page, runConfig))) {
           return false;
         }
+
+        // Search warmup: 3-5 related searches before exact video (gated by searchWarmupEnabled)
+        await runSearchWarmup(
+          page,
+          videoTitle,
+          channelName,
+          this.profileId || '',
+          (p, text) => humanType(p, text, this.typingSpeed),
+          (level, msg) => this.log(level, msg),
+        ).catch((err) => this.log('warn', `[SearchWarmup] error (non-critical): ${err.message}`));
 
         searchResult = await openVideoSmart(
           page,

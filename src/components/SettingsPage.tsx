@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from 'react';
 import {
   Save, RefreshCw, Globe, Database, Server, Shield, Eye, EyeOff, Monitor, Key, Folder,
-  Download, Upload, Zap, ExternalLink, Brain, Bell, Send, Trash2,
+  Download, Upload, Zap, ExternalLink, Brain, Bell, Send, Trash2, Maximize2, Cookie, Search,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { BrowserProvider, ProviderSelection } from '../services/browserProviderApi';
@@ -715,6 +715,111 @@ export default function SettingsPage() {
               <span className="text-xs text-gray-500">No key — using persona system (Researcher, Casual, Skimmer, etc.)</span>
             </div>
           )}
+        </Section>
+
+        {/* Window Resolution */}
+        <Section title="Browser Window Resolution" icon={<Maximize2 size={15} className="text-indigo-400" />} note="Controls profile window size and fingerprint screen resolution — applied when windows auto-arrange">
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+              {([
+                ['1280x720', '1280', '720'],
+                ['1366x768', '1366', '768'],
+                ['1440x900', '1440', '900'],
+                ['1600x900', '1600', '900'],
+                ['1920x1080', '1920', '1080'],
+              ] as const).map(([label, w, h]) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => { update('windowWidth', w); update('windowHeight', h); }}
+                  className={`rounded-xl border px-3 py-2 text-sm transition-all ${
+                    settings.windowWidth === w && settings.windowHeight === h
+                      ? 'bg-indigo-900/30 border-indigo-500/50 text-indigo-300 font-semibold'
+                      : 'bg-gray-800 border-gray-700 text-gray-400 hover:border-gray-500'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="Width (px)" value={settings.windowWidth} onChange={(v) => update('windowWidth', v)} type="number" desc="Browser window / fingerprint screen width" />
+              <Field label="Height (px)" value={settings.windowHeight} onChange={(v) => update('windowHeight', v)} type="number" desc="Browser window / fingerprint screen height" />
+            </div>
+            <p className="text-xs text-gray-500">Saved to <code className="text-gray-400">user-settings.json</code> — used by window arranger grid and new profile fingerprints. Android/mobile profiles keep their own viewport.</p>
+          </div>
+        </Section>
+
+        {/* High RPM Cookie Warmup */}
+        <Section title="High RPM/CPM Cookie Warmup" icon={<Cookie size={15} className="text-amber-400" />} note="Interest/cookie warmup for QA browsing behavior — OFF by default. When ON, each profile visits 3–5 random USA/UK finance sites before YouTube.">
+          <div className="space-y-4">
+            <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-white text-sm font-semibold">Enable cookie warmup</p>
+                <p className="text-gray-500 text-xs mt-1">Profiles visit random USA/UK high RPM finance/loan/insurance sites before YouTube to simulate interest cookies. OFF = no external sites visited.</p>
+              </div>
+              <ToggleSwitch
+                enabled={settingOn(settings.highRpmCookieWarmupEnabled)}
+                onChange={(v) => update('highRpmCookieWarmupEnabled', v)}
+              />
+            </div>
+            {settingOn(settings.highRpmCookieWarmupEnabled) && (
+              <div className="grid grid-cols-2 gap-4">
+                <Field
+                  label="Min sites per profile"
+                  value={settings.warmupVisitCountMin}
+                  onChange={(v) => update('warmupVisitCountMin', v)}
+                  type="number"
+                  desc="Min random sites visited"
+                />
+                <Field
+                  label="Max sites per profile"
+                  value={settings.warmupVisitCountMax}
+                  onChange={(v) => update('warmupVisitCountMax', v)}
+                  type="number"
+                  desc="Max random sites visited"
+                />
+              </div>
+            )}
+            <div className="text-xs text-gray-600">
+              Site categories: loans · mortgage · insurance · credit cards · investment · tax · banking · finance searches (USA/UK only)
+            </div>
+          </div>
+        </Section>
+
+        {/* Search Warmup */}
+        <Section title="Search Warmup (Pre-video Related Searches)" icon={<Search size={15} className="text-teal-400" />} note="Before finding the exact video, perform 3–5 related YouTube searches — realistic QA browsing behavior. OFF by default.">
+          <div className="space-y-4">
+            <div className="bg-gray-800 border border-gray-700 rounded-xl p-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-white text-sm font-semibold">Enable search warmup</p>
+                <p className="text-gray-500 text-xs mt-1">When ON: before exact video search, agent does 3–5 related YouTube keyword searches (no video click). Each profile gets different keywords. When OFF: goes directly to exact title search.</p>
+              </div>
+              <ToggleSwitch
+                enabled={settingOn(settings.searchWarmupEnabled)}
+                onChange={(v) => update('searchWarmupEnabled', v)}
+              />
+            </div>
+            {settingOn(settings.searchWarmupEnabled) && (
+              <div className="grid grid-cols-2 gap-4">
+                <Field
+                  label="Min search attempts"
+                  value={settings.searchWarmupAttemptMin}
+                  onChange={(v) => update('searchWarmupAttemptMin', v)}
+                  type="number"
+                  desc="Min related searches before exact video"
+                />
+                <Field
+                  label="Max search attempts"
+                  value={settings.searchWarmupAttemptMax}
+                  onChange={(v) => update('searchWarmupAttemptMax', v)}
+                  type="number"
+                  desc="Max related searches before exact video"
+                />
+              </div>
+            )}
+            <p className="text-xs text-gray-500">After warmup searches, the agent still finds and verifies the exact video as normal. Direct URL fallback remains last resort only.</p>
+          </div>
         </Section>
 
         <GitPushSection />

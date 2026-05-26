@@ -307,16 +307,14 @@ const ANDROID_USER_AGENTS = [
 // SCREEN RESOLUTIONS PER OS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-/** Common desktop resolutions for Windows */
+/** Common desktop resolutions for Windows — 1280x720 and 1280x1024 removed (too small / old 4:3) */
 const WINDOWS_RESOLUTIONS = [
   '1920x1080',
   '1366x768',
   '1536x864',
   '1440x900',
-  '1280x720',
   '2560x1440',
   '1600x900',
-  '1280x1024',
 ];
 
 /** macOS Retina and standard resolutions */

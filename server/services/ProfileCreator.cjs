@@ -315,33 +315,38 @@ class ProfileCreator {
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    // Step 8: High CPC/RPM/CPM cookies — INSIDE create pipeline (before return)
-    // Profile create → MLX metadata → live bake → cookies saved → then response
-    // NOT a separate step after UI "Create" finishes
+    // Step 8: High RPM/CPM interest cookie warmup — gated by highRpmCookieWarmupEnabled setting
+    // Profile create → MLX metadata → live bake (only when toggle ON) → cookies saved → return
+    // Toggle OFF (default) = no Amazon/eBay/finance site visits
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     let cookieWarmingSet = false;
     let cookieWarmDetails = null;
     if (browserType === 'multilogin' && profileId) {
       try {
-        const { HighCPCCookieWarmer } = require('./HighCPCCookieWarmer.cjs');
-        const warmer = new HighCPCCookieWarmer(provider);
-        cookieWarmDetails = await warmer.warmOnCreate(profileId, {
-          profileMode: useQuickProfile ? 'quick' : 'cloud',
-        });
-        cookieWarmingSet = cookieWarmDetails.metadataSet || cookieWarmDetails.liveBake;
+        const { HighCPCCookieWarmer, loadWarmupSettings } = require('./HighCPCCookieWarmer.cjs');
+        const warmupSettings = loadWarmupSettings();
+        if (!warmupSettings.enabled) {
+          console.log(`[ProfileCreator] Cookie warmup skipped: highRpmCookieWarmupEnabled=false`);
+        } else {
+          const warmer = new HighCPCCookieWarmer(provider);
+          cookieWarmDetails = await warmer.warmOnCreate(profileId, {
+            profileMode: useQuickProfile ? 'quick' : 'cloud',
+          });
+          cookieWarmingSet = cookieWarmDetails.metadataSet || cookieWarmDetails.liveBake;
 
-        if (cookieWarmDetails.metadataSet) {
-          console.log(
-            `[ProfileCreator] High-CPC/RPM cookies metadata → ${cookieWarmDetails.metadataMessage}`
-          );
-        }
-        if (cookieWarmDetails.liveBake) {
-          console.log(
-            `[ProfileCreator] Live cookie bake OK — ${cookieWarmDetails.cookieCount} cookies, ` +
-            `sites: ${(cookieWarmDetails.sitesVisited || []).length} (Google/YouTube/Amazon/Facebook)`
-          );
-        } else if (cookieWarmDetails.bakeError && !useQuickProfile) {
-          console.warn(`[ProfileCreator] Live cookie bake skipped/failed: ${cookieWarmDetails.bakeError}`);
+          if (cookieWarmDetails.metadataSet) {
+            console.log(
+              `[ProfileCreator] High-CPC/RPM cookies metadata → ${cookieWarmDetails.metadataMessage}`
+            );
+          }
+          if (cookieWarmDetails.liveBake) {
+            console.log(
+              `[ProfileCreator] Live cookie bake OK — ${cookieWarmDetails.cookieCount} cookies, ` +
+              `sites: ${(cookieWarmDetails.sitesVisited || []).length}`
+            );
+          } else if (cookieWarmDetails.bakeError && !useQuickProfile) {
+            console.warn(`[ProfileCreator] Live cookie bake skipped/failed: ${cookieWarmDetails.bakeError}`);
+          }
         }
       } catch (err) {
         console.warn(`[ProfileCreator] Cookie warming error for ${profileId}: ${err.message}`);

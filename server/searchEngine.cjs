@@ -12,12 +12,206 @@
 function randomDelay(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+const fs = require('fs');
+const path = require('path');
 const {
   STOP_WORDS,
   cleanChannelLabel,
   verifyVideoMatch,
   parseDurationText,
 } = require('./utils/videoMatch.cjs');
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SEARCH WARMUP — Related searches before exact video (QA browsing behavior)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+const SEARCH_WARMUP_SETTINGS_FILE = path.resolve(__dirname, '..', 'user-settings.json');
+
+function loadSearchWarmupSettings() {
+  try {
+    if (!fs.existsSync(SEARCH_WARMUP_SETTINGS_FILE)) return { enabled: false, min: 3, max: 5 };
+    const s = JSON.parse(fs.readFileSync(SEARCH_WARMUP_SETTINGS_FILE, 'utf8'));
+    const enabled = s.searchWarmupEnabled === true || s.searchWarmupEnabled === 'true';
+    const min = Math.max(1, parseInt(s.searchWarmupAttemptMin, 10) || 3);
+    const max = Math.max(min, parseInt(s.searchWarmupAttemptMax, 10) || 5);
+    return { enabled, min, max };
+  } catch {
+    return { enabled: false, min: 3, max: 5 };
+  }
+}
+
+/**
+ * Finance/general keyword pool for search warmup related queries.
+ * Per-profile variation: shuffled by profileId seed.
+ */
+const WARMUP_QUERY_SEEDS = [
+  'best personal loan rates',
+  'car insurance comparison',
+  'home mortgage rates today',
+  'best credit cards cashback',
+  'investment portfolio tips',
+  'tax filing online free',
+  'best savings account uk',
+  'compare life insurance quotes',
+  'student loan refinancing',
+  'banking apps best 2026',
+  'travel rewards credit card',
+  'auto insurance quotes',
+  'health insurance plans usa',
+  'refinance home loan calculator',
+  'best etf to invest in',
+];
+
+function seededShuffle(arr, seed) {
+  const a = [...arr];
+  let h = seed | 0;
+  for (let i = a.length - 1; i > 0; i--) {
+    h = Math.imul(h ^ (h >>> 17), 0x45d9f3b) | 0;
+    const j = ((h >>> 0) % (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function profileSeed(profileId) {
+  const s = String(profileId || '');
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = Math.imul(31, h) + s.charCodeAt(i) | 0;
+  return h;
+}
+
+/**
+ * Generate 3-5 related warmup queries from video title + channel + general pool.
+ * Each call for same profileId returns consistent (but different from other profiles) set.
+ */
+function buildWarmupQueries(videoTitle, channelName, profileId, count) {
+  const title = String(videoTitle || '');
+  const channel = String(channelName || '');
+  const seed = profileSeed(profileId);
+
+  // Extract a few keywords from the title
+  const cleanTitle = title.replace(/[()[\]{}|:!?—–\-]/g, ' ').replace(/\b\d{4}\b/g, '').replace(/\s+/g, ' ').trim();
+  const titleWords = cleanTitle.split(' ').filter(w => w.length > 3 && !STOP_WORDS.has(w.toLowerCase())).map(w => w.toLowerCase());
+  const titleKeyword = titleWords.slice(0, 3).join(' ');
+  const channelKeyword = channel ? channel.split(' ').slice(0, 2).join(' ') : '';
+
+  // Mix title-derived queries with general pool
+  const candidates = [];
+  if (titleKeyword) candidates.push(titleKeyword);
+  if (channelKeyword) candidates.push(`${channelKeyword} videos`);
+  if (titleKeyword && channelKeyword) candidates.push(`${channelKeyword} ${titleWords[0] || ''}`);
+
+  const shuffledPool = seededShuffle(WARMUP_QUERY_SEEDS, seed);
+  for (const q of shuffledPool) {
+    if (candidates.length >= count + 3) break;
+    candidates.push(q);
+  }
+
+  // Take `count` unique queries, shuffled per profile
+  const unique = [...new Set(candidates.filter(q => q.trim().length > 3))];
+  return seededShuffle(unique, seed + 1).slice(0, count);
+}
+
+/**
+ * Run 3-5 related YouTube searches before exact video search.
+ * Does NOT click any video — just searches and briefly browses results.
+ * Time-capped and fail-safe: skip on error, never loop endlessly.
+ *
+ * @param {object} page - Playwright page
+ * @param {string} videoTitle
+ * @param {string} channelName
+ * @param {string} profileId - for per-profile variation
+ * @param {Function} humanTypeFn - (page, text) => Promise<void>
+ * @param {Function} log - (level, msg) => void
+ * @returns {Promise<void>}
+ */
+async function runSearchWarmup(page, videoTitle, channelName, profileId, humanTypeFn, log) {
+  const settings = loadSearchWarmupSettings();
+  if (!settings.enabled) {
+    log('info', '[SearchWarmup] skipped: searchWarmupEnabled=false');
+    return;
+  }
+
+  const count = settings.min + Math.floor(Math.random() * (settings.max - settings.min + 1));
+  const queries = buildWarmupQueries(videoTitle, channelName, profileId, count);
+
+  log('info', `[SearchWarmup] starting ${queries.length} related searches before exact video search`);
+
+  const WARMUP_TOTAL_CAP_MS = 90_000; // max 90s total for all warmup
+  const warmupStart = Date.now();
+
+  for (let i = 0; i < queries.length; i++) {
+    if (Date.now() - warmupStart > WARMUP_TOTAL_CAP_MS) {
+      log('warn', '[SearchWarmup] time cap reached — skipping remaining warmup attempts');
+      break;
+    }
+
+    const query = queries[i];
+    log('info', `[SearchWarmup] attempt ${i + 1}/${queries.length} via YouTube: ${query}`);
+
+    try {
+      // Navigate to YouTube search (no video click — just search and browse)
+      const currentUrl = page.url() || '';
+      const onYouTube = currentUrl.includes('youtube.com');
+
+      if (onYouTube) {
+        await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+        await sleep(randomDelay(200, 400));
+        // Type in search bar
+        let typed = false;
+        try {
+          await page.keyboard.press('/');
+          await sleep(500);
+          const focused = await page.evaluate(() => document.activeElement?.id === 'search' || document.activeElement?.tagName === 'INPUT').catch(() => false);
+          if (focused) {
+            await page.keyboard.press('Control+a');
+            await sleep(100);
+            await page.keyboard.press('Backspace');
+            await sleep(100);
+            await humanTypeFn(page, query);
+            typed = true;
+          }
+        } catch { /* fallback */ }
+
+        if (!typed) {
+          try {
+            const input = await page.$('input#search').catch(() => null);
+            if (input) {
+              await input.click();
+              await sleep(300);
+              await page.keyboard.press('Control+a');
+              await page.keyboard.press('Backspace');
+              await humanTypeFn(page, query);
+              typed = true;
+            }
+          } catch { /* ignore */ }
+        }
+
+        if (typed) {
+          await sleep(randomDelay(300, 600));
+          await page.keyboard.press('Enter');
+          await sleep(randomDelay(2000, 4000));
+          // Brief scroll through results (don't click anything)
+          await page.mouse.wheel(0, randomDelay(200, 500)).catch(() => {});
+          await sleep(randomDelay(1000, 2500));
+          await page.mouse.wheel(0, -randomDelay(100, 300)).catch(() => {});
+          await sleep(randomDelay(500, 1000));
+        }
+      } else {
+        // Not on YouTube — use direct search URL
+        const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+        await sleep(randomDelay(2000, 3500));
+        await page.mouse.wheel(0, randomDelay(200, 500)).catch(() => {});
+        await sleep(randomDelay(800, 1800));
+      }
+    } catch (err) {
+      log('warn', `[SearchWarmup] attempt ${i + 1} failed: ${err.message} — skipping`);
+    }
+  }
+
+  log('info', '[SearchWarmup] complete → proceeding to exact video search');
+}
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // SEARCH QUERY GENERATOR — Escalation Levels
@@ -1419,4 +1613,7 @@ module.exports = {
   searchDuckDuckGo,
   searchYahoo,
   searchChannelPage,
+  runSearchWarmup,
+  loadSearchWarmupSettings,
+  buildWarmupQueries,
 };

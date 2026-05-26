@@ -308,6 +308,17 @@ const DEFAULT_SETTINGS = {
   multiloginAutoEmptyTrash: 'false',
   multiloginAutoEmptyTrashHours: '6',
   multiloginAutoArrangeWindows: 'true',
+  // Window / display resolution
+  windowWidth: '1920',
+  windowHeight: '1080',
+  // High RPM/CPM Cookie Warmup
+  highRpmCookieWarmupEnabled: 'false',
+  warmupVisitCountMin: '3',
+  warmupVisitCountMax: '5',
+  // Search warmup (pre-video related searches)
+  searchWarmupEnabled: 'false',
+  searchWarmupAttemptMin: '3',
+  searchWarmupAttemptMax: '5',
 };
 
 function getMaxConcurrent() {

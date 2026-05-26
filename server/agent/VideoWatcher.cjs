@@ -632,6 +632,8 @@ const videoWatcherPrototype = {
 
 
     let playCheckCancelled = false;
+    let autoplayCheckTick = 0;
+    const AUTOPLAY_CHECK_EVERY_N_TICKS = 10; // check autoplay every ~10 ticks ≈ 40-70s
     const playCheckTimers = new Set();
     const schedulePlayCheck = () => {
       if (playCheckCancelled) return;
@@ -640,6 +642,26 @@ const videoWatcherPrototype = {
         playCheckTimers.delete(tid);
         if (playCheckCancelled) return;
         try {
+          autoplayCheckTick++;
+          // Periodic autoplay re-check (every N ticks) — ensures autoplay stays OFF during watch
+          if (autoplayCheckTick % AUTOPLAY_CHECK_EVERY_N_TICKS === 0) {
+            const { verifyAutoplayOff: verifyAP, ensureAutoplayOff: ensureAP } = bx();
+            if (typeof verifyAP === 'function') {
+              const apState = await verifyAP(page).catch(() => null);
+              if (apState === false) {
+                // Autoplay is ON — turn it OFF
+                this.log('warn', '[Autoplay] re-check during watch: ON — turning OFF');
+                if (typeof ensureAP === 'function') {
+                  await ensureAP(page, (l, m) => this.log(l, m)).catch(() => {});
+                }
+              } else if (apState === true) {
+                this.log('info', '[Autoplay] re-check during watch: OFF ✓');
+              } else {
+                this.log('info', '[Autoplay] re-check during watch: UNKNOWN (preference already set)');
+              }
+            }
+          }
+
           const adInfo = await detectYouTubeAd(page);
           const hasAd = adInfo.hasAd;
 

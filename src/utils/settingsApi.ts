@@ -57,6 +57,17 @@ export interface AppSettings {
   multiloginAutoEmptyTrash: boolean | string;
   multiloginAutoEmptyTrashHours: string;
   multiloginAutoArrangeWindows: boolean | string;
+  // Window / display resolution
+  windowWidth: string;
+  windowHeight: string;
+  // High RPM/CPM Cookie Warmup
+  highRpmCookieWarmupEnabled: boolean | string;
+  warmupVisitCountMin: string;
+  warmupVisitCountMax: string;
+  // Search warmup (pre-video related searches)
+  searchWarmupEnabled: boolean | string;
+  searchWarmupAttemptMin: string;
+  searchWarmupAttemptMax: string;
 }
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
@@ -108,6 +119,17 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   multiloginAutoEmptyTrash: false,
   multiloginAutoEmptyTrashHours: '6',
   multiloginAutoArrangeWindows: true,
+  // Window / display resolution
+  windowWidth: '1920',
+  windowHeight: '1080',
+  // High RPM/CPM Cookie Warmup
+  highRpmCookieWarmupEnabled: false,
+  warmupVisitCountMin: '3',
+  warmupVisitCountMax: '5',
+  // Search warmup (pre-video related searches)
+  searchWarmupEnabled: false,
+  searchWarmupAttemptMin: '3',
+  searchWarmupAttemptMax: '5',
 };
 
 const STORAGE_KEY = 'mmb_yt_settings';
