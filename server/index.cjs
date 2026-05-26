@@ -2319,6 +2319,10 @@ async function gracefulShutdown(signal) {
   console.log(`Received ${signal} — shutting down gracefully...`);
 
   try {
+    notificationService.stopCommandPoller();
+  } catch { /* ignore */ }
+
+  try {
     clearInterval(_ramWarnIntervalId);
     clearInterval(_analyticsDailyInterval);
     clearInterval(_scheduledJobsTickerId);
@@ -2367,6 +2371,63 @@ async function gracefulShutdown(signal) {
   });
 }
 
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// TELEGRAM BOT — data provider for command poller
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+function getTodayWatchStats() {
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const cutoff = todayStart.getTime();
+
+  let videosWatched = 0;
+  let totalWatchSec = 0;
+  let likes = 0;
+  const profilesUsed = new Set();
+
+  for (const [profileId, rows] of Object.entries(watchHistory)) {
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (!row.watchedAt || row.watchedAt < cutoff) continue;
+      videosWatched++;
+      profilesUsed.add(profileId);
+      // estimate watch time from watchPercent (assume avg 8min video)
+      if (row.watchPercent) totalWatchSec += Math.round((row.watchPercent / 100) * 480);
+      if (row.liked) likes++;
+    }
+  }
+
+  return { videosWatched, totalWatchSec, likes, profilesUsed: profilesUsed.size };
+}
+
+function buildTelegramDataProvider() {
+  return {
+    getAgentManagerStatus: () => agentManager.getStatus(),
+    getActiveYTCount: () => agentManager.getActiveCount(),
+    getOrchestratorStats: () => orchestrator.getStats(),
+    getManualAgentCount: () => activeAgents.size,
+    getRunningScheduleCount: () => runningSchedules.size,
+    getRunningSchedules: () => [...runningSchedules.values()],
+    getRecentErrorsAndWarnings: (n = 5) => {
+      const errResult  = activityLog.getLogs({ level: 'error', limit: n });
+      const warnResult = activityLog.getLogs({ level: 'warn',  limit: n });
+      return {
+        errors:   (errResult.entries  || []).slice(-n).reverse(),
+        warnings: (warnResult.entries || []).slice(-n).reverse(),
+      };
+    },
+    getTodayStats: () => getTodayWatchStats(),
+    stopAllAgents: async () => {
+      orchestrator.stopAll();
+      await agentManager.stopAll();
+      for (const [, ag] of activeAgents) {
+        try { await ag.disconnect(); } catch { /* ignore */ }
+      }
+      activeAgents.clear();
+    },
+  };
+}
+
 const server = app.listen(PORT, () => {
   const providerName = (process.env.BROWSER_PROVIDER || 'morelogin').toUpperCase();
   console.log(`\n🤖 MMB-AGENT Backend Server running on http://localhost:${PORT}`);
@@ -2387,6 +2448,9 @@ const server = app.listen(PORT, () => {
   console.log(`     POST /api/update/run`);
   console.log(`     POST /api/update/push`);
   console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
+
+  // Start Telegram bot command poller
+  notificationService.startCommandPoller(buildTelegramDataProvider());
 });
 
 process.on('SIGTERM', () => {
