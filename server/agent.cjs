@@ -317,8 +317,6 @@ class ProfileAgent {
     // Session-level flags — initialized ONCE per session (not per video)
     // _subscribedThisSession must NOT be reset on every video — subscribe should fire at most once per session
     this._subscribedThisSession = false;
-    this._warmedUp = false;
-    // Cached Android detection — evaluated once during warmup, reused for all videos
     this._isAndroidProfile = false;
     this._blockRecoveryCount = 0;
     this._maxBlockRecoveries = 2;
@@ -473,6 +471,15 @@ class ProfileAgent {
    * Sign-in / captcha wall → clear cache or recreate via worker callback.
    */
   async recoverFromPageBlock(page, reason = 'block') {
+    // In 24/7 mode, sign-in wall means the profile is logged out — go straight to recreate
+    // via the recycle manager instead of the local clear_cache/recreate flow.
+    if (reason === 'signin' && this.options.onSignInRequired) {
+      this.log('warn', 'Sign-in wall detected — delegating recreate to 24/7 manager');
+      try { await this.disconnect().catch(() => {}); } catch {}
+      await this.options.onSignInRequired({ profileId: this.profileId });
+      return false;
+    }
+
     if (this._blockRecoveryCount >= this._maxBlockRecoveries) {
       this.log('error', `Max block recoveries (${this._maxBlockRecoveries}) reached`);
       return false;
@@ -633,15 +640,9 @@ class ProfileAgent {
     return [pool[idx1]];
   }
 
-  async warmup(runConfig = {}) {
-    if (!this.context) return;
-
-    // ── Warmup toggle: respect user's per-session setting ──
-    // warmupEnabled defaults to true; set false in VideoShufflePage to skip entirely
-    if (runConfig.warmupEnabled === false) {
-      this.log('info', 'Warmup: skipped (disabled in settings)');
-      return;
-    }
+  async warmup(_runConfig = {}) {
+    // Warmup removed — profiles go directly to YouTube
+    return;
 
     this.log('info', 'Warmup: Starting pre-YouTube browsing...');
     this.status = 'warmup';
@@ -773,13 +774,6 @@ class ProfileAgent {
     if (!(await this._pingBrowserAlive())) {
       this.log('error', 'Browser/CDP ping failed — cannot run search/watch safely');
       return false;
-    }
-
-    // WARMUP: First video of session — browse homepage + maybe shorts
-    // NOTE: use `config` here (the function parameter) — `runConfig` is not yet defined at this point
-    if (!this._warmedUp) {
-      await this.warmup(config);
-      this._warmedUp = true;
     }
 
     // Reset per-video flags (like/comment are per-video, subscribe is per-SESSION so NOT reset here)
@@ -1106,11 +1100,6 @@ class ProfileAgent {
     if (!this.context) { this.log('error', 'No browser context'); return false; }
 
     // WARMUP: First video of session
-    if (!this._warmedUp) {
-      await this.warmup(config);
-      this._warmedUp = true;
-    }
-
     // Reset per-video flags (subscribe is per-SESSION so NOT reset here)
     this._likedThisVideo = false;
     this._commentedThisVideo = false;

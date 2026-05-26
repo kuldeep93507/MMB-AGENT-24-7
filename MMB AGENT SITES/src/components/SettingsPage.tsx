@@ -3,6 +3,7 @@ import {
   Save, RefreshCw, Globe, Server, Clock, Shield, Eye, EyeOff,
   Monitor, Layers, Key, Folder, AlertCircle, CheckCircle,
   Loader, Lock, Unlock, RotateCcw, Zap, ChevronRight, Brain,
+  Bell, Send, Trash2,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import type { BrowserProvider, ProviderSelection } from '../services/browserProviderApi';
@@ -17,6 +18,14 @@ interface AppSettings {
   multiloginPassword: string;
   multiloginToken: string;
   multiloginFolderId: string;
+  multiloginFolderIds: string[];
+  telegramBotToken: string;
+  telegramChatId: string;
+  notifyEmail: string;
+  smtpHost: string;
+  smtpUser: string;
+  smtpPass: string;
+  browserNotifEnabled: boolean;
   adspowerApiKey: string;
   adspowerPort: string;
   proxyServer: string;
@@ -43,6 +52,14 @@ const DEFAULT_SETTINGS: AppSettings = {
   multiloginPassword: '',
   multiloginToken: '',
   multiloginFolderId: '',
+  multiloginFolderIds: [],
+  telegramBotToken: '',
+  telegramChatId: '',
+  notifyEmail: '',
+  smtpHost: '',
+  smtpUser: '',
+  smtpPass: '',
+  browserNotifEnabled: false,
   adspowerApiKey: '',
   adspowerPort: '50325',
   proxyServer: 'us.smartproxy.net',
@@ -103,7 +120,41 @@ export default function SettingsPage() {
   const [showMlToken, setShowMlToken] = useState(false);
   const [showProxyPass, setShowProxyPass] = useState(false);
   const [showAnthropicKey, setShowAnthropicKey] = useState(false);
+  const [showSmtpPass,    setShowSmtpPass]    = useState(false);
   const [proxyUnlocked, setProxyUnlocked] = useState(false);
+  const [testingNotify, setTestingNotify]   = useState<'telegram' | 'email' | null>(null);
+  const [notifyTestResult, setNotifyTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [browserNotifStatus, setBrowserNotifStatus] = useState<'unknown' | 'granted' | 'denied'>('unknown');
+
+  useEffect(() => {
+    if ('Notification' in window) {
+      setBrowserNotifStatus(Notification.permission === 'granted' ? 'granted' : Notification.permission === 'denied' ? 'denied' : 'unknown');
+    }
+  }, []);
+
+  const runNotifyTest = async (type: 'telegram' | 'email') => {
+    setTestingNotify(type);
+    setNotifyTestResult(null);
+    try {
+      const r = await fetch('/backend-api/api/notify/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, ...settings }),
+      });
+      const d = await r.json();
+      setNotifyTestResult(d);
+    } catch {
+      setNotifyTestResult({ ok: false, message: 'Backend not running' });
+    }
+    setTestingNotify(null);
+  };
+
+  const enableBrowserNotifs = async () => {
+    if (!('Notification' in window)) return;
+    const perm = await Notification.requestPermission();
+    setBrowserNotifStatus(perm === 'granted' ? 'granted' : perm === 'denied' ? 'denied' : 'unknown');
+    if (perm === 'granted') update('browserNotifEnabled', true);
+  };
   const [backendStatus, setBackendStatus] = useState<'loading' | 'ok' | 'error'>('loading');
   const [testStatus, setTestStatus]   = useState<Record<string, TestStatus>>({});
   const [testMsg, setTestMsg]         = useState<Record<string, string>>({});
@@ -404,6 +455,51 @@ export default function SettingsPage() {
               <p className="text-gray-600 text-xs mt-1">Multilogin → Profile Groups → right-click folder → Copy ID</p>
             </div>
 
+            {/* Multi-folder support */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-gray-400 text-xs flex items-center gap-1">
+                  <Folder size={11} /> Additional Folder IDs
+                  <span className="text-gray-600 ml-1">— profiles fetched from all folders</span>
+                </label>
+                <button type="button"
+                  onClick={() => {
+                    const ids = Array.isArray(settings.multiloginFolderIds) ? settings.multiloginFolderIds : [];
+                    update('multiloginFolderIds', [...ids, '']);
+                  }}
+                  className="text-xs px-2 py-1 rounded-lg bg-purple-600/20 text-purple-400 border border-purple-600/30 hover:bg-purple-600/30">
+                  + Add Folder
+                </button>
+              </div>
+              {(!Array.isArray(settings.multiloginFolderIds) || settings.multiloginFolderIds.length === 0) ? (
+                <p className="text-xs text-gray-600 italic">No additional folders — only primary folder is used</p>
+              ) : (
+                <div className="space-y-2">
+                  {settings.multiloginFolderIds.map((fid, idx) => (
+                    <div key={idx} className="flex gap-2">
+                      <input type="text" value={fid}
+                        placeholder={`Folder ID ${idx + 2}`}
+                        onChange={e => {
+                          const ids = [...settings.multiloginFolderIds];
+                          ids[idx] = e.target.value;
+                          update('multiloginFolderIds', ids);
+                        }}
+                        className="flex-1 bg-gray-800 border border-gray-700 text-gray-200 rounded-xl px-3 py-2 text-sm font-mono focus:outline-none focus:border-purple-500" />
+                      <button type="button"
+                        onClick={() => {
+                          const ids = [...settings.multiloginFolderIds];
+                          ids.splice(idx, 1);
+                          update('multiloginFolderIds', ids);
+                        }}
+                        className="p-2 bg-gray-800 border border-red-700/30 rounded-xl text-red-400 hover:bg-red-900/20">
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Automation Token */}
             <div className="bg-gray-800 border border-purple-900/40 rounded-xl p-4">
               <div className="flex items-center gap-2 mb-3">
@@ -674,6 +770,74 @@ export default function SettingsPage() {
             <span className={`text-xs ${settings.anthropicApiKey ? 'text-green-400' : 'text-gray-500'}`}>
               {settings.anthropicApiKey ? 'AI Brain active — Claude will guide profile behaviour' : 'AI Brain disabled — using persona system'}
             </span>
+          </div>
+        </Section>
+
+        {/* Notifications */}
+        <Section title="Notifications" icon={<Bell size={15} className="text-cyan-400" />}
+          note="Browser popups (local) + Telegram instant alerts + Email reports">
+
+          {/* Browser */}
+          <div className="p-4 bg-gray-800/60 border border-gray-700 rounded-xl space-y-3 mb-4">
+            <p className="text-sm text-gray-300 font-medium">Browser Notifications (free — no setup)</p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" onClick={() => void enableBrowserNotifs()}
+                className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium">
+                Allow browser notifications
+              </button>
+              <span className={`text-xs ${browserNotifStatus === 'granted' ? 'text-green-400' : browserNotifStatus === 'denied' ? 'text-red-400' : 'text-gray-500'}`}>
+                {browserNotifStatus === 'granted' ? '● Allowed' : browserNotifStatus === 'denied' ? '● Blocked — enable in browser settings' : '● Not requested yet'}
+              </span>
+            </div>
+          </div>
+
+          {notifyTestResult && (
+            <div className={`mb-4 text-xs px-3 py-2 rounded-lg border ${notifyTestResult.ok ? 'bg-green-900/20 border-green-700/40 text-green-400' : 'bg-red-900/20 border-red-700/40 text-red-400'}`}>
+              {notifyTestResult.message}
+            </div>
+          )}
+
+          {/* Telegram */}
+          <p className="text-xs text-gray-500 mb-3">
+            <strong className="text-gray-400">Telegram setup:</strong> @BotFather → /newbot → copy Bot Token · Chat ID: message @userinfobot · Save settings, then Test.
+          </p>
+          <div className="grid md:grid-cols-2 gap-4 mb-4">
+            <Field label="Telegram Bot Token" value={settings.telegramBotToken} onChange={v => update('telegramBotToken', v)} mono />
+            <Field label="Telegram Chat ID"   value={settings.telegramChatId}   onChange={v => update('telegramChatId', v)}   mono />
+          </div>
+
+          {/* Email */}
+          <div className="grid md:grid-cols-2 gap-4 mb-4">
+            <Field label="Notify Email"  value={settings.notifyEmail} onChange={v => update('notifyEmail', v)} />
+            <Field label="SMTP Host"     value={settings.smtpHost}    onChange={v => update('smtpHost', v)}    mono />
+            <Field label="SMTP User"     value={settings.smtpUser}    onChange={v => update('smtpUser', v)}    mono />
+            <div>
+              <label className="text-gray-400 text-xs font-medium block mb-1.5">SMTP Password</label>
+              <div className="flex gap-2">
+                <input type={showSmtpPass ? 'text' : 'password'} value={settings.smtpPass}
+                  onChange={e => update('smtpPass', e.target.value)}
+                  className="flex-1 bg-gray-800 border border-gray-700 text-gray-200 rounded-xl px-3 py-2.5 text-sm font-mono focus:outline-none" />
+                <button type="button" onClick={() => setShowSmtpPass(!showSmtpPass)}
+                  className="p-2.5 bg-gray-800 border border-gray-700 rounded-xl text-gray-400">
+                  {showSmtpPass ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={testingNotify !== null}
+              onClick={() => void runNotifyTest('telegram')}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white text-sm">
+              <Send size={14} />
+              {testingNotify === 'telegram' ? 'Sending…' : 'Test Telegram'}
+            </button>
+            <button type="button" disabled={testingNotify !== null}
+              onClick={() => void runNotifyTest('email')}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gray-700 hover:bg-gray-600 disabled:opacity-50 text-white text-sm">
+              <Send size={14} />
+              {testingNotify === 'email' ? 'Sending…' : 'Test Email'}
+            </button>
           </div>
         </Section>
 

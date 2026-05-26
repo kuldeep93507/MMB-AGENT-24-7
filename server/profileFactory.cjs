@@ -47,13 +47,13 @@ class ProfileFactory {
     }
 
     const profileId = createResult.data.id;
-    await sleep(3000);
+    await sleep(1500); // brief settle after create before start
 
     let startResult = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       startResult = await this.provider.startProfile(profileId);
       if (startResult.code === 0 && startResult.data?.cdpPort) break;
-      if (attempt < 3) await sleep(5000);
+      if (attempt < 3) await sleep(3000);
     }
 
     if (!startResult || startResult.code !== 0 || !startResult.data?.cdpPort) {

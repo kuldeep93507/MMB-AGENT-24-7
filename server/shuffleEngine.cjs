@@ -293,7 +293,6 @@ function buildProfileConfig(profileId, browserType, settings) {
     adSkipEnabled: settings.adSkipEnabled !== false,
     adSkipAfterSec: settings.adSkipAfterSec ?? 5,
     midRollAdWaitSec: settings.midRollAdWaitSec ?? 10,
-    warmupEnabled: settings.warmupEnabled !== false,
     humanEngagementEnabled: true,
     seekForwardMax: 2,
     seekForwardSec: 10,

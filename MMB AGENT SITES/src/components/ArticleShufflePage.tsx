@@ -2,9 +2,15 @@ import { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Shuffle, Play, RotateCcw, BookOpen, User, Globe, AlertCircle,
   Settings, RefreshCw, X, StopCircle, Save, ChevronDown, ChevronUp,
+  Repeat, Pause, Square,
 } from 'lucide-react';
 import type { Profile, Site, Article, ReadHistory } from '../types';
 import { useStore } from '../store/useStore';
+import {
+  fetchRecycleStatus, startRecycleLoop, stopRecycleLoop,
+  pauseRecycleLoop, resumeRecycleLoop,
+  type RecycleStatus,
+} from '../utils/recycleApi';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Types
@@ -100,6 +106,68 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
   const [runId,       setRunId]       = useState<string | null>(null);
   const [runStatus,   setRunStatus]   = useState<'idle' | 'running' | 'done'>('idle');
   const [progress,    setProgress]    = useState<ProgressEntry[]>([]);
+
+  // ── 24/7 Recycle Loop
+  const [recycleStatus, setRecycleStatus] = useState<RecycleStatus | null>(null);
+  const [recycleBusy,   setRecycleBusy]   = useState(false);
+  const [articlesPerCycle, setArticlesPerCycle] = useState(3);
+  const [cooldownMinutes,  setCooldownMinutes]  = useState(10);
+
+  useEffect(() => {
+    const poll = () => void fetchRecycleStatus().then(s => { if (s) setRecycleStatus(s); });
+    poll();
+    const iv = setInterval(poll, 3000);
+    return () => clearInterval(iv);
+  }, []);
+
+  const recycleActive  = !!(recycleStatus?.enabled && recycleStatus.slots.some(s => s.enabled));
+  const recycleIsPaused = recycleActive && recycleStatus!.slots.filter(s => s.enabled).every(s => s.isPaused);
+
+  const handleStartRecycle = async () => {
+    const targetProfiles = selectedProfiles.size > 0
+      ? profiles.filter(p => selectedProfiles.has(p.id))
+      : profiles;
+    if (!targetProfiles.length || !availableArticles.length) return;
+    setRecycleBusy(true);
+    // Send articles pool + provider + cooldown so backend can actually run them
+    await startRecycleLoop(
+      targetProfiles.map(p => ({
+        profileId: p.id,
+        profileName: p.name,
+        articleCount: articlesPerCycle,
+      })),
+      availableArticles.map(a => ({ url: a.url, title: a.title })),
+      browserProvider || 'morelogin',
+      cooldownMinutes,
+    );
+    const s = await fetchRecycleStatus();
+    if (s) setRecycleStatus(s);
+    setRecycleBusy(false);
+  };
+
+  const handleStopRecycle = async () => {
+    setRecycleBusy(true);
+    await stopRecycleLoop();
+    const s = await fetchRecycleStatus();
+    if (s) setRecycleStatus(s);
+    setRecycleBusy(false);
+  };
+
+  const handlePauseRecycle = async () => {
+    setRecycleBusy(true);
+    await pauseRecycleLoop();
+    const s = await fetchRecycleStatus();
+    if (s) setRecycleStatus(s);
+    setRecycleBusy(false);
+  };
+
+  const handleResumeRecycle = async () => {
+    setRecycleBusy(true);
+    await resumeRecycleLoop();
+    const s = await fetchRecycleStatus();
+    if (s) setRecycleStatus(s);
+    setRecycleBusy(false);
+  };
 
   // ── Fix #2: Poll backend status while running
   useEffect(() => {
@@ -349,6 +417,49 @@ export default function ArticleShufflePage({ profiles, sites, readHistory }: Art
             </p>
           </div>
           <div className="flex gap-2 flex-wrap justify-end">
+            {/* 24/7 Loop controls */}
+            {recycleActive && !recycleIsPaused && (
+              <button disabled={recycleBusy} onClick={() => void handlePauseRecycle()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-amber-600/20 border border-amber-600/40 text-amber-300 text-xs font-medium hover:bg-amber-600/30 disabled:opacity-50 transition-all">
+                <Pause size={13} /> Pause 24/7
+              </button>
+            )}
+            {recycleActive && recycleIsPaused && (
+              <button disabled={recycleBusy} onClick={() => void handleResumeRecycle()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-green-600/20 border border-green-600/40 text-green-300 text-xs font-medium hover:bg-green-600/30 disabled:opacity-50 transition-all">
+                <Play size={13} /> Resume 24/7
+              </button>
+            )}
+            {recycleActive && (
+              <button disabled={recycleBusy} onClick={() => void handleStopRecycle()}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-red-700/80 text-white text-xs font-medium hover:bg-red-600 disabled:opacity-50 transition-all">
+                <Square size={13} /> Stop 24/7
+              </button>
+            )}
+            {!recycleActive && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500 text-xs">Arts/cycle:</span>
+                  <input type="number" min={1} max={20} value={articlesPerCycle}
+                    onChange={e => setArticlesPerCycle(Math.max(1, Number(e.target.value)))}
+                    className="w-12 bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-none"
+                    title="Articles per profile per cycle" />
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="text-gray-500 text-xs">Cooldown:</span>
+                  <input type="number" min={1} max={120} value={cooldownMinutes}
+                    onChange={e => setCooldownMinutes(Math.max(1, Number(e.target.value)))}
+                    className="w-12 bg-gray-800 border border-gray-700 text-gray-200 rounded-lg px-2 py-1.5 text-xs font-mono focus:outline-none"
+                    title="Cooldown minutes between cycles" />
+                  <span className="text-gray-500 text-xs">min</span>
+                </div>
+                <button disabled={recycleBusy || availableArticles.length === 0}
+                  onClick={() => void handleStartRecycle()}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-medium transition-all">
+                  <Repeat size={13} /> Start 24/7
+                </button>
+              </div>
+            )}
             <button onClick={shuffleAll} disabled={availableArticles.length === 0}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-sm font-semibold transition-all">
               <Shuffle size={15} /> Shuffle

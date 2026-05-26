@@ -1117,6 +1117,12 @@ function initProfileRecycleManager() {
     }
   };
 
+  orchestrator.onWorkerSignInRequired = (profileId) => {
+    if (profileRecycleManager?.isRecycleProfile(profileId)) {
+      profileRecycleManager.immediateRecreate(profileId);
+    }
+  };
+
   if (!profileRecycleManager.enabled) {
     profileRecycleManager.resumeFromShuffleConfig().catch((err) => {
       console.warn('[Recycle] Shuffle config resume failed:', err.message);

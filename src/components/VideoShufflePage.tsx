@@ -177,7 +177,6 @@ interface ShuffleSettings {
   adSkipEnabled: boolean;
   adSkipAfterSec: number;
   midRollAdWaitSec: number;
-  warmupEnabled: boolean;
 }
 
 const DEFAULT_SHUFFLE_SETTINGS: ShuffleSettings = {
@@ -191,7 +190,6 @@ const DEFAULT_SHUFFLE_SETTINGS: ShuffleSettings = {
   adSkipEnabled: true,
   adSkipAfterSec: 5,
   midRollAdWaitSec: 10,
-  warmupEnabled: true,
 };
 
 function loadShuffleSettings(): ShuffleSettings {
@@ -225,7 +223,6 @@ function normalizeShuffleSettings(parsed: Partial<ShuffleSettings>): ShuffleSett
     adSkipEnabled: merged.adSkipEnabled !== false,
     adSkipAfterSec: Math.max(0, Math.min(120, Number(merged.adSkipAfterSec) || 5)),
     midRollAdWaitSec: Math.max(0, Math.min(120, Number(merged.midRollAdWaitSec) || 10)),
-    warmupEnabled: merged.warmupEnabled !== false,
   };
 }
 
@@ -920,7 +917,6 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
       adSkipEnabled: settings.adSkipEnabled,
       adSkipAfterSec: settings.adSkipAfterSec,
       midRollAdWaitSec: settings.midRollAdWaitSec,
-      warmupEnabled: settings.warmupEnabled,
       humanEngagementEnabled: true,
       seekForwardMax: 2,
       seekForwardSec: 10,
@@ -1539,22 +1535,6 @@ export default function VideoShufflePage({ profiles, channels, getVideos, onRefr
                     {q}
                   </button>
                 ))}
-              </div>
-            </div>
-            <div className="lg:col-span-2 border-t border-gray-800 pt-4">
-              <label className="text-xs text-gray-400 block mb-2 font-medium text-green-400/90">Warmup Settings</label>
-              <div className="grid sm:grid-cols-2 gap-4 mb-4">
-                <label className="flex items-center gap-2 text-sm text-gray-400">
-                  <input type="checkbox" checked={settings.warmupEnabled}
-                    onChange={e => setSettings(s => ({ ...s, warmupEnabled: e.target.checked }))}
-                    className="rounded border-gray-600" />
-                  Warmup enabled
-                </label>
-                <p className="text-xs text-gray-600 self-center">
-                  {settings.warmupEnabled
-                    ? '✅ Session shuru hone se pehle high-CPM sites browse hoga (har profile ke liye alag)'
-                    : '⏭️ Warmup skip — direct YouTube pe jaayega'}
-                </p>
               </div>
             </div>
             <div className="lg:col-span-2 border-t border-gray-800 pt-4">

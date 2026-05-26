@@ -1,23 +1,26 @@
 import {
   LayoutDashboard, Users, Settings, FileText, Globe, Calendar, Gamepad2,
-  BarChart3, MessageSquare, Shield, Shuffle, Link, PanelLeftClose, PanelLeftOpen, Server
+  BarChart3, MessageSquare, Shield, Shuffle, Link, PanelLeftClose, PanelLeftOpen,
+  Server, Activity, Zap,
 } from 'lucide-react';
 import { useState } from 'react';
 
 const NAV_ITEMS = [
-  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'profiles', label: 'Profiles', icon: Users },
-  { id: 'sites', label: 'Sites', icon: Globe },
-  { id: 'article-shuffle', label: 'Article Shuffle', icon: Shuffle },
-  { id: 'backlinks', label: 'Backlinks', icon: Link },
-  { id: 'scheduler', label: 'Scheduler', icon: Calendar },
-  { id: 'manual', label: 'Manual Control', icon: Gamepad2 },
-  { id: 'analytics', label: 'Analytics', icon: BarChart3 },
-  { id: 'comments', label: 'Comments', icon: MessageSquare },
+  { id: 'dashboard',        label: 'Dashboard',        icon: LayoutDashboard },
+  { id: 'profiles',         label: 'Profiles',         icon: Users },
+  { id: 'sites',            label: 'Sites',            icon: Globe },
+  { id: 'monitor',          label: 'Live Monitor',     icon: Activity },
+  { id: 'article-shuffle',  label: 'Article Shuffle',  icon: Shuffle },
+  { id: 'engagement',       label: 'Engagement',       icon: Zap },
+  { id: 'backlinks',        label: 'Backlinks',        icon: Link },
+  { id: 'scheduler',        label: 'Scheduler',        icon: Calendar },
+  { id: 'manual',           label: 'Manual Control',   icon: Gamepad2 },
+  { id: 'analytics',        label: 'Analytics',        icon: BarChart3 },
+  { id: 'comments',         label: 'Comments',         icon: MessageSquare },
   { id: 'profile-settings', label: 'Profile Settings', icon: Users },
-  { id: 'proxy-health', label: 'Proxy Health', icon: Shield },
-  { id: 'logs', label: 'Activity Logs', icon: FileText },
-  { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'proxy-health',     label: 'Proxy Health',     icon: Shield },
+  { id: 'logs',             label: 'Activity Logs',    icon: FileText },
+  { id: 'settings',         label: 'Settings',         icon: Settings },
 ];
 
 interface SidebarProps {
@@ -73,6 +76,9 @@ export default function Sidebar({ activeTab, setActiveTab, runningCount, activeS
               <span className="ml-auto text-xs bg-green-600/30 text-green-400 border border-green-600/30 px-1.5 py-0.5 rounded-full">
                 {runningCount}
               </span>
+            )}
+            {!collapsed && id === 'monitor' && runningCount > 0 && (
+              <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" />
             )}
             {!collapsed && id === 'sites' && activeSites > 0 && (
               <span className="ml-auto text-xs bg-emerald-600/30 text-emerald-400 border border-emerald-600/30 px-1.5 py-0.5 rounded-full">

@@ -222,14 +222,14 @@ async function setVideoQuality(page, quality, logFn = () => {}) {
     await sleep(mobile ? 1500 : 2000);
 
     if (mobile) {
+      // Tap video to reveal player controls on mobile
+      const videoEl = await page.$('video').catch(() => null);
+      if (videoEl) { await videoEl.click().catch(() => {}); await sleep(700); }
+
       const setMobile = await page.evaluate((res) => {
         try {
-          const v = document.querySelector('video');
-          if (v && v.getVideoPlaybackQuality) {
-            /* quality set via menu only on mobile */
-          }
           const gear = document.querySelector(
-            'button[aria-label*="Settings" i], button[aria-label*="Quality" i], .player-settings-icon, button.ytm-settings-button',
+            'ytm-icon-button[data-test-id="settings-button"], button[aria-label*="Settings" i], button[aria-label*="Quality" i], .ytm-settings-button, button.ytm-settings-button, .player-settings-icon',
           );
           if (gear) { gear.click(); return 'opened-menu'; }
           return null;
@@ -239,7 +239,7 @@ async function setVideoQuality(page, quality, logFn = () => {}) {
       if (setMobile === 'opened-menu') {
         await sleep(800);
         const picked = await page.evaluate((res) => {
-          const items = [...document.querySelectorAll('button, [role="menuitem"], .ytm-menu-item-renderer')];
+          const items = [...document.querySelectorAll('button, [role="menuitem"], .ytm-menu-item-renderer, ytm-menu-item-renderer')];
           for (const el of items) {
             const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase();
             if (t.includes(res) && (t.includes('p') || t.includes(res))) {
@@ -256,6 +256,16 @@ async function setVideoQuality(page, quality, logFn = () => {}) {
       }
       logFn('warn', `[Quality] Mobile ${quality} — menu not found (may stay auto)`);
       return false;
+    }
+
+    // Desktop: hover player first so controls become visible
+    const playerEl = await page.$('#movie_player, .html5-video-player').catch(() => null);
+    if (playerEl) {
+      const box = await playerEl.boundingBox().catch(() => null);
+      if (box) {
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height - 30, { steps: 5 }).catch(() => {});
+        await sleep(500);
+      }
     }
 
     const settingsBtn = await page.$('.ytp-settings-button');
@@ -334,8 +344,9 @@ async function disableAutoplay(page, logFn = () => {}) {
       }).catch(() => null);
       if (!state || !state.visible) return false;
       const isOn = state.pressed === 'true' || state.checked === 'true' || state.hasActiveClass;
-      // If state is ambiguous (null/undefined), still try to click once
-      if (isOn || (state.pressed === null && state.checked === null)) {
+      // Only click when we're sure autoplay is ON — ambiguous state skips click
+      // to avoid accidentally turning autoplay ON when it was already OFF (Bug 6 fix)
+      if (isOn) {
         await el.dispatchEvent('click').catch(() => {});
         await el.click({ force: true }).catch(() => {});
         await sleep(400);
@@ -453,38 +464,106 @@ async function ensureAutoplayOff(page, logFn = () => {}) {
 }
 
 async function dismissYouTubePopups(page, logFn = () => {}) {
-  try {
-    const clicked = await page.evaluate(() => {
-      const labels = [
-        'accept all', 'accept', 'i agree', 'agree', 'got it', 'reject all', 'reject',
-        'no thanks', 'not now', 'dismiss', 'close', 'continue', 'allow all',
-      ];
-      for (const sel of [
-        'button[aria-label*="Accept" i]', 'button[aria-label*="Reject" i]',
-        'tp-yt-paper-button', 'ytd-button-renderer button', 'button',
-      ]) {
-        for (const el of document.querySelectorAll(sel)) {
-          const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase().trim();
-          if (!t || t.length > 40) continue;
-          if (labels.some((w) => t === w || t.includes(w))) {
-            const r = el.getBoundingClientRect();
+  // Retry up to 3 times — popup can appear 1-3s after page load
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      // Handle Google consent page redirect (consent.youtube.com or accounts.google.com/consent)
+      const url = page.url();
+      if (url.includes('consent.youtube.com') || url.includes('consent.google.com')) {
+        const consentClicked = await page.evaluate(() => {
+          const btns = [...document.querySelectorAll('button, .VfPpkd-LgbsSe')];
+          // Priority: "Accept all" first — don't click "Reject all" by mistake
+          const priority = ['accept all', 'accept', 'agree', 'reject all', 'reject'];
+          for (const keyword of priority) {
+            const btn = btns.find((b) => (b.textContent || '').toLowerCase().trim().includes(keyword));
+            if (btn) { btn.click(); return keyword; }
+          }
+          const formBtn = document.querySelector('form[action*="consent"] button, form button[type="submit"]');
+          if (formBtn) { formBtn.click(); return 'consent-form-submit'; }
+          return null;
+        });
+        if (consentClicked) {
+          logFn('info', `[YouTube popup] Consent page dismissed: "${consentClicked}"`);
+          await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+          await sleep(randomDelay(1000, 2000));
+          return;
+        }
+      }
+
+      // Inline popup / modal on YouTube page
+      const clicked = await page.evaluate(() => {
+        // Priority order for button text — "Accept all" before "Reject all"
+        const preferredLabels = ['accept all', 'allow all', 'accept', 'i agree', 'agree', 'got it'];
+        const dismissLabels = ['reject all', 'reject', 'no thanks', 'not now', 'dismiss', 'close', 'continue'];
+        const allLabels = [...preferredLabels, ...dismissLabels];
+
+        function findByText(container, labels) {
+          const buttons = [...container.querySelectorAll('button, tp-yt-paper-button, ytd-button-renderer button')];
+          for (const keyword of labels) {
+            const btn = buttons.find((b) => {
+              const t = (b.textContent || b.getAttribute('aria-label') || '').toLowerCase().trim();
+              return t === keyword || t.includes(keyword);
+            });
+            if (btn) {
+              const r = btn.getBoundingClientRect();
+              if (r.width > 20 && r.height > 12) { btn.click(); return keyword; }
+            }
+          }
+          return null;
+        }
+
+        // YouTube-specific consent containers — search for "Accept all" by text first
+        const ytContainers = [
+          document.querySelector('ytd-consent-bump-v2-lightbox'),
+          document.querySelector('yt-consent-ui-lightbox'),
+          document.querySelector('tp-yt-paper-dialog'),
+          document.querySelector('.ytd-consent-bump-v2-lightbox'),
+        ].filter(Boolean);
+
+        for (const container of ytContainers) {
+          const result = findByText(container, allLabels);
+          if (result) return `[dialog] ${result}`;
+        }
+
+        // aria-label based buttons (fallback)
+        for (const sel of ['button[aria-label*="Accept" i]', 'button[aria-label*="Agree" i]']) {
+          const btn = document.querySelector(sel);
+          if (btn) {
+            const r = btn.getBoundingClientRect();
             if (r.width > 20 && r.height > 12 && r.top >= 0 && r.top < window.innerHeight) {
-              el.click();
-              return t.slice(0, 30);
+              btn.click(); return sel.slice(0, 40);
             }
           }
         }
+
+        // Generic scan — entire page, text-priority order
+        for (const sel of ['tp-yt-paper-button', 'ytd-button-renderer button', 'button']) {
+          for (const el of document.querySelectorAll(sel)) {
+            const t = (el.textContent || el.getAttribute('aria-label') || '').toLowerCase().trim();
+            if (!t || t.length > 40) continue;
+            if (allLabels.some((w) => t === w || t.includes(w))) {
+              const r = el.getBoundingClientRect();
+              if (r.width > 20 && r.height > 12 && r.top >= 0 && r.top < window.innerHeight) {
+                el.click();
+                return t.slice(0, 30);
+              }
+            }
+          }
+        }
+        return null;
+      });
+
+      if (clicked) {
+        logFn('info', `[YouTube popup] Dismissed (attempt ${attempt}): "${clicked}"`);
+        await sleep(randomDelay(800, 1500));
+        return; // popup dismissed — stop retrying
       }
-      const consent = document.querySelector('button[aria-label*="Accept" i], form[action*="consent"] button');
-      if (consent) { consent.click(); return 'consent-btn'; }
-      return null;
-    });
-    if (clicked) {
-      logFn('info', `[YouTube popup] Dismissed: "${clicked}"`);
-      await sleep(randomDelay(800, 1500));
+    } catch (err) {
+      logFn('warn', `[YouTube popup] Attempt ${attempt} error: ${err.message}`);
     }
-  } catch (err) {
-    logFn('warn', `[YouTube popup] Error: ${err.message}`);
+
+    // No popup found/clicked this attempt — wait and try again (popup may not have appeared yet)
+    if (attempt < 3) await sleep(randomDelay(1500, 2500));
   }
 }
 

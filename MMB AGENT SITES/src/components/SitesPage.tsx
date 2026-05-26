@@ -4,7 +4,7 @@ import type { Site, SyncInterval } from '../types';
 
 interface SitesPageProps {
   sites: Site[];
-  addSite: (url: string, sitemapUrl: string, syncInterval: SyncInterval) => Promise<Site>;
+  addSite: (url: string, sitemapUrl: string, syncInterval: SyncInterval) => Promise<Site | undefined>;
   deleteSite: (id: string) => void;
   syncSite: (id: string) => Promise<void>;
   syncAllSites: () => Promise<void>;
@@ -321,7 +321,7 @@ export default function SitesPage({ sites, addSite, deleteSite, syncSite, syncAl
           onClose={() => setShowAddModal(false)}
           onAdd={async (url, sitemapUrl, syncInterval) => {
             const site = await addSite(url, sitemapUrl, syncInterval);
-            showToast(`Site added: ${site.name}`);
+            if (site) showToast(`Site added: ${site.name}`);
             return site;
           }}
         />
@@ -345,7 +345,7 @@ function AddSiteModal({
   onAdd,
 }: {
   onClose: () => void;
-  onAdd: (url: string, sitemapUrl: string, syncInterval: SyncInterval) => Promise<Site>;
+  onAdd: (url: string, sitemapUrl: string, syncInterval: SyncInterval) => Promise<Site | undefined>;
 }) {
   const [siteUrl, setSiteUrl]         = useState('');
   const [sitemapUrl, setSitemapUrl]   = useState('');

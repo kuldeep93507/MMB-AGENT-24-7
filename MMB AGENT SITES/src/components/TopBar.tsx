@@ -7,6 +7,8 @@ interface TopBarProps {
   profiles: Profile[];
   logs: LogEntry[];
   activeTab: string;
+  newArticleCount?: number;
+  onClearArticleCount?: () => void;
 }
 
 const PROVIDER_OPTIONS = [
@@ -16,7 +18,7 @@ const PROVIDER_OPTIONS = [
   { value: 'all',        label: 'All',        icon: '🌐' },
 ] as const;
 
-export default function TopBar({ profiles, logs, activeTab }: TopBarProps) {
+export default function TopBar({ profiles, logs, activeTab, newArticleCount = 0, onClearArticleCount }: TopBarProps) {
   const [time, setTime] = useState(new Date());
   const [providerOpen, setProviderOpen] = useState(false);
   const browserProvider = useStore((s) => s.browserProvider);
@@ -36,7 +38,9 @@ export default function TopBar({ profiles, logs, activeTab }: TopBarProps) {
     dashboard: 'Dashboard',
     profiles: 'Profiles',
     sites: 'Sites',
+    monitor: 'Live Monitor',
     'article-shuffle': 'Article Shuffle',
+    engagement: 'Engagement',
     backlinks: 'Backlinks',
     scheduler: 'Scheduler',
     manual: 'Manual Control',
@@ -96,12 +100,23 @@ export default function TopBar({ profiles, logs, activeTab }: TopBarProps) {
           <span>Online</span>
         </div>
         <div className="relative">
-          <Bell size={16} className="text-gray-500 hover:text-gray-300 cursor-pointer" />
-          {recentErrors > 0 && (
-            <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-red-500 rounded-full text-[9px] text-white flex items-center justify-center">
-              {recentErrors}
-            </span>
-          )}
+          <button
+            onClick={onClearArticleCount}
+            className="relative p-1 rounded-lg hover:bg-gray-800 transition-colors"
+            title={newArticleCount > 0 ? `${newArticleCount} new article reads — click to clear` : 'No new reads'}
+          >
+            <Bell size={16} className={newArticleCount > 0 ? 'text-green-400' : 'text-gray-500'} />
+            {newArticleCount > 0 && (
+              <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-green-500 rounded-full text-[9px] text-white flex items-center justify-center font-bold">
+                {newArticleCount > 9 ? '9+' : newArticleCount}
+              </span>
+            )}
+            {recentErrors > 0 && newArticleCount === 0 && (
+              <span className="absolute -top-1 -right-1 w-3.5 h-3.5 bg-red-500 rounded-full text-[9px] text-white flex items-center justify-center">
+                {recentErrors}
+              </span>
+            )}
+          </button>
         </div>
       </div>
     </header>

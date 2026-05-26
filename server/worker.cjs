@@ -90,6 +90,9 @@ async function runWorker(data) {
   sendStatus(profileId, 'starting');
   sendLog(profileId, 'info', `Starting profile via ${providerLabel}...`);
 
+  // Flag set by onSignInRequired — breaks video loop so 24/7 manager can recreate the profile
+  let signInRequired = false;
+
   let cdpPort = null;
   let cdpEndpoint = null;
   try {
@@ -102,8 +105,8 @@ async function runWorker(data) {
       sendLog(profileId, 'info', `Profile started! CDP port: ${cdpPort}`);
     } else {
       // Start may take time — wait and retry once
-      sendLog(profileId, 'warn', `Start response: ${startRes.message || 'pending'} — waiting 10s...`);
-      await sleep(10000);
+      sendLog(profileId, 'warn', `Start response: ${startRes.message || 'pending'} — waiting 5s before retry...`);
+      await sleep(5000);
       startRes = await provider.startProfile(profileId);
       if (startRes.code === 0 && startRes.data?.cdpPort) {
         cdpPort = startRes.data.cdpPort;
@@ -136,14 +139,19 @@ async function runWorker(data) {
   // Step 2: Connect Playwright CDP (Multilogin needs warm-up time after window opens)
   sendStatus(profileId, 'connecting');
   if (browserType === 'multilogin') {
-    sendLog(profileId, 'info', 'Waiting 6s for Multilogin browser CDP to become ready...');
-    await sleep(6000);
+    sendLog(profileId, 'info', 'Waiting 2s for Multilogin browser to open before CDP connect...');
+    await sleep(2000); // connectWithRetry handles actual CDP readiness (10 attempts × 4s)
   }
   const agent = new ProfileAgent(profileId, profileName, cdpPort, {
     cdpEndpoint,
     profileOs: typeof config.profileOs === 'string' ? config.profileOs : '',
     // Forward agent internal logs → main thread → frontend UI
     onLog: (level, message) => sendLog(profileId, level, message),
+    onSignInRequired: config._isRecycleRun ? async ({ profileId: pid }) => {
+      sendLog(pid, 'warn', 'Sign-in wall — notifying 24/7 manager for immediate profile recreate');
+      if (parentPort) parentPort.postMessage({ type: 'signin_required', profileId: pid });
+      signInRequired = true;
+    } : null,
     onRecoverProfile: async ({ profileId: pid, strategy, profileName: pname }) => {
       sendLog(pid, 'warn', `YouTube block detected — running recovery: ${strategy}`);
       const res = await recoverProfile({
@@ -197,6 +205,7 @@ async function runWorker(data) {
 
   // Step 3: Watch videos one by one
   for (let i = 0; i < videos.length; i++) {
+    if (signInRequired) break;
     const video = videos[i];
     sendStatus(profileId, 'watching', { currentVideo: video.title || video.value, progress: `${i + 1}/${videos.length}` });
     sendLog(profileId, 'info', `Video ${i + 1}/${videos.length}: "${video.title || video.value}"`);
@@ -314,7 +323,6 @@ async function runWorker(data) {
           if (restartRes.code === 0 && restartRes.data?.cdpPort) {
             agent.debugPort = restartRes.data.cdpPort;
             agent.cdpEndpoint = restartRes.data.cdpEndpoint || `http://127.0.0.1:${restartRes.data.cdpPort}`;
-            agent._warmedUp = false;
             agent._lastPage = null;
             await sleep(browserType === 'multilogin' ? 6000 : 2000);
             reconnected = browserType === 'multilogin'
@@ -358,6 +366,13 @@ async function runWorker(data) {
       sendLog(profileId, 'info', `Waiting ${Math.round(tabDelay / 1000)}s before next video...`);
       await sleep(tabDelay);
     }
+  }
+
+  // If sign-in was detected, let the 24/7 manager handle the shutdown/recreate
+  if (signInRequired) {
+    sendLog(profileId, 'warn', 'Exiting worker — 24/7 manager will recreate this profile');
+    sendDone(profileId, results);
+    return;
   }
 
   // Step 4: Done — wait 10s, stop Multilogin profile, then disconnect Playwright
