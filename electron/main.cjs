@@ -1,6 +1,11 @@
 const { app, BrowserWindow, screen } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { spawn } = require('child_process');
+
+// Icon path — safe fallback if file missing
+const ICON_PATH = path.join(__dirname, 'icon.png');
+const appIcon = fs.existsSync(ICON_PATH) ? ICON_PATH : undefined;
 
 let mainWindow = null;
 let splashWindow = null;
@@ -46,7 +51,7 @@ function createMainWindow() {
     show: false, // Don't show until ready
     frame: true,
     title: 'MMB Agent 24/7',
-    icon: path.join(__dirname, 'icon.png'),
+    icon: appIcon,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -89,9 +94,22 @@ function createMainWindow() {
 // START BACKEND SERVER
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function startBackend() {
-  const serverPath = path.join(__dirname, '..', 'server', 'index.cjs');
+  // In packaged app: server is in extraResources → real filesystem at process.resourcesPath/server/
+  // In dev: server is at project root/server/
+  const serverPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'server', 'index.cjs')
+    : path.join(__dirname, '..', 'server', 'index.cjs');
+
+  // cwd must also be outside asar so server can write user-settings.json, logs, etc.
+  const serverCwd = app.isPackaged
+    ? process.resourcesPath
+    : path.join(__dirname, '..');
+
+  console.log(`[Electron] Starting backend: ${serverPath}`);
+  console.log(`[Electron] Backend cwd: ${serverCwd}`);
+
   backendProcess = spawn('node', [serverPath], {
-    cwd: path.join(__dirname, '..'),
+    cwd: serverCwd,
     stdio: 'pipe',
     env: { ...process.env, NODE_ENV: 'production' },
   });
