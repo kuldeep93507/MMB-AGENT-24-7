@@ -151,6 +151,15 @@ class Orchestrator {
             });
           }
           break;
+        case 'signin_required':
+          // 24/7 worker detected sign-in wall — notify recycle manager to recreate immediately.
+          // Mark as done so the subsequent 'done' message doesn't re-trigger onWorkerFinished.
+          if (!state.finishNotified) {
+            state.finishNotified = true;
+            state.status = 'done';
+            if (this.onWorkerSignInRequired) this.onWorkerSignInRequired(emitProfileId);
+          }
+          break;
         case 'backlink_used':
           if (msg.backlinkId && this.onBacklinkUsed) {
             this.onBacklinkUsed([msg.backlinkId]);
@@ -440,6 +449,7 @@ class Orchestrator {
         commentText: schedule.commentText || '',
       });
       config.browserType = browserType;
+      config._isRecycleRun = !!schedule._recycleSlotId;
 
       const validation = validateProfileConfig(config);
       if (!validation.ok) {

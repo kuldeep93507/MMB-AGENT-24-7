@@ -10,6 +10,7 @@ const path = require('path');
 const RecreateHandler = require('./services/RecreateHandler.cjs');
 const { assignOneProfile, buildRecycleSchedule } = require('./shuffleEngine.cjs');
 const appDataStore = require('./appDataStore.cjs');
+const gmailLoginManager = require('./gmailLoginManager.cjs');
 
 const RECYCLE_FILE = path.resolve(__dirname, '..', 'recycle_state.json');
 const QUEUE_POLL_MS = 5000;
@@ -396,11 +397,12 @@ class ProfileRecycleManager {
     } else if (success && !didWatch) {
       slot.errorRetries = (slot.errorRetries || 0) + 1;
       slot.lastError = 'No videos watched';
-      this._log('warn', `${slot.profileName} finished with 0 watched — quick retry (${slot.errorRetries}/${this.maxErrorRetries})`);
+      const noWatchCooldown = this.cooldownMinMs;
+      this._log('warn', `${slot.profileName} finished with 0 watched — quick retry (${slot.errorRetries}/${this.maxErrorRetries}), cooldown ${Math.round(noWatchCooldown / 60000)}m (user config)`);
       slot.status = 'cooldown';
-      slot.cooldownUntil = Date.now() + ERROR_RETRY_MS;
+      slot.cooldownUntil = Date.now() + noWatchCooldown;
       this._saveState();
-      this._scheduleCooldown(slotId, ERROR_RETRY_MS);
+      this._scheduleCooldown(slotId, noWatchCooldown);
     } else {
       slot.errorRetries = (slot.errorRetries || 0) + 1;
       slot.lastError = `Worker ${status}`;
@@ -414,10 +416,12 @@ class ProfileRecycleManager {
         this._scheduleCooldown(slotId, 5000);
         return;
       }
+      const errorCooldown = this.cooldownMinMs;
+      this._log('warn', `${slot.profileName} — error cooldown ${Math.round(errorCooldown / 60000)}m (user config)`);
       slot.status = 'cooldown';
-      slot.cooldownUntil = Date.now() + ERROR_RETRY_MS;
+      slot.cooldownUntil = Date.now() + errorCooldown;
       this._saveState();
-      this._scheduleCooldown(slotId, ERROR_RETRY_MS);
+      this._scheduleCooldown(slotId, errorCooldown);
     }
 
     this._processQueue();
@@ -457,6 +461,17 @@ class ProfileRecycleManager {
     if (slot.status === 'running' && this._isWorkerActive(slot.currentProfileId)) {
       this._log('warn', `${slot.profileName} — recreate skipped, worker still running`);
       this._saveState();
+      return;
+    }
+
+    // Guard: skip recreate if Gmail is locked — manual fix needed first
+    const LOCKED_GMAIL_STATUSES = ['blocked', 'needs_phone', 'captcha', 'wrong_password'];
+    const gmailStatus = gmailLoginManager.getProfileGmailStatus(slot.currentProfileId);
+    if (gmailStatus && LOCKED_GMAIL_STATUSES.includes(gmailStatus)) {
+      slot.status = 'error';
+      slot.lastError = `Gmail locked (${gmailStatus}) — fix Gmail first, then restart slot`;
+      this._saveState();
+      this._log('error', `${slot.profileName} — recreate skipped: Gmail status is "${gmailStatus}". Resolve manually.`);
       return;
     }
 
@@ -629,6 +644,42 @@ class ProfileRecycleManager {
     }
     this._saveState();
     return this.getStatus();
+  }
+
+  /**
+   * Called when the worker detects a sign-in wall in 24/7 mode.
+   * Skips cooldown and triggers an immediate profile recreate.
+   */
+  immediateRecreate(profileId) {
+    const slotId = this.profileToSlot.get(profileId);
+    if (!slotId) return;
+    const slot = this.slots.get(slotId);
+    if (!slot || !this.enabled || slot.enabled === false) return;
+    if (slot.status === 'recreating') return; // already in progress
+
+    this._log('warn', `${slot.profileName} — sign-in wall detected, scheduling immediate recreate`);
+
+    // Cancel any existing cooldown timer
+    const t = this._timers.get(slotId);
+    if (t) { clearTimeout(t); this._timers.delete(slotId); }
+
+    slot.status = 'recreating';
+    slot.cooldownUntil = null;
+    slot.errorRetries = 0;
+    slot.lastError = 'Sign-in wall — profile recreating';
+    this._saveState();
+
+    // Give the worker 5s to exit cleanly before _afterCooldown stops the browser
+    const timer = setTimeout(() => {
+      this._timers.delete(`signin_${slotId}`);
+      this._afterCooldown(slotId).catch((err) => {
+        slot.status = 'error';
+        slot.lastError = err.message;
+        this._saveState();
+        this._log('error', `${slot.profileName} sign-in recreate failed: ${err.message}`);
+      });
+    }, 5000);
+    this._timers.set(`signin_${slotId}`, timer);
   }
 
   isRecycleProfile(profileId) {

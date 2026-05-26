@@ -29,18 +29,40 @@ function bx() {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async function detectYouTubeAd(page) {
   return page.evaluate(() => {
+    const isMobile = location.hostname === 'm.youtube.com';
+    const video = document.querySelector('video');
+
+    if (isMobile) {
+      // ── Mobile YouTube (m.youtube.com) ad detection ──
+      const mobileSkipSel = 'ytm-skip-ad-renderer button, .ytp-skip-ad-button, .ytp-ad-skip-button-modern, button[aria-label*="Skip" i]';
+      const skipBtn = document.querySelector(mobileSkipSel);
+      const skipVisible = !!(skipBtn && skipBtn.offsetParent !== null && window.getComputedStyle(skipBtn).display !== 'none');
+
+      const player = document.querySelector('.player-container, .html5-video-player, ytm-player');
+      const adShowingOnPlayer = player?.classList.contains('ad-showing') || player?.classList.contains('ad-interrupting');
+
+      if (!adShowingOnPlayer && video && video.currentTime > 5 && video.duration > 0) {
+        return { hasAd: false, skipVisible: false };
+      }
+      if (adShowingOnPlayer) return { hasAd: true, skipVisible };
+
+      const mobileAdOverlay = document.querySelector('ytm-skip-ad-renderer, .ytm-ad-action-interstitial-overlay, ytm-companion-ad-renderer, .ytm-ad-progress-overlay-renderer');
+      if (mobileAdOverlay) return { hasAd: true, skipVisible };
+
+      if (skipVisible && (!video || video.currentTime <= 2)) return { hasAd: true, skipVisible: true };
+
+      return { hasAd: false, skipVisible: false };
+    }
+
+    // ── Desktop YouTube ad detection (unchanged) ──
     const skipSelectors = '.ytp-skip-ad-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button, button[aria-label*="Skip" i], .ytp-ad-skip-button-slot button';
     const skipBtn = document.querySelector(skipSelectors);
     const skipVisible = !!(skipBtn && skipBtn.offsetParent !== null
       && window.getComputedStyle(skipBtn).display !== 'none');
 
     const player = document.querySelector('#movie_player, .html5-video-player');
-    const video = document.querySelector('video');
 
     // ── PRIORITY 1: Main video already playing properly ──────────────────────
-    // Check this FIRST — if the main video is running, any leftover ad UI
-    // (skip button, overlay) is a stale false-positive and must be ignored.
-    // Use ad-showing class absence + currentTime > 5s as the primary signal.
     const adShowingOnPlayer = player?.classList.contains('ad-showing')
       || player?.classList.contains('ad-interrupting');
     if (!adShowingOnPlayer && video && video.currentTime > 5 && video.duration > 0) {
@@ -62,7 +84,6 @@ async function detectYouTubeAd(page) {
     }
 
     // ── PRIORITY 4: Skip button visible (only if video hasn't started yet) ───
-    // Avoid false-positives when the main video is buffering at t=0
     if (skipVisible && (!video || video.currentTime <= 2)) {
       return { hasAd: true, skipVisible: true };
     }
@@ -86,9 +107,16 @@ async function ensureYouTubeAdSkipper(page, config = {}) {
     window.__mmbAdSkipperInstalled = true;
     window.__mmbAdSkipStart = null;
 
+    const isMobile = location.hostname === 'm.youtube.com';
+
     const isAdPlaying = () => {
-      const player = document.querySelector('#movie_player, .html5-video-player');
+      const player = document.querySelector(
+        isMobile ? '.player-container, .html5-video-player, ytm-player' : '#movie_player, .html5-video-player',
+      );
       if (player?.classList.contains('ad-showing') || player?.classList.contains('ad-interrupting')) return true;
+      if (isMobile) {
+        return !!document.querySelector('ytm-skip-ad-renderer, .ytm-ad-action-interstitial-overlay, ytm-companion-ad-renderer, .ytp-skip-ad-button, button[aria-label*="Skip" i]');
+      }
       return !!document.querySelector('.ytp-ad-player-overlay, .ytp-ad-text, .ytp-ad-preview-text, .ytp-skip-ad-button, .ytp-ad-skip-button');
     };
 
@@ -102,7 +130,13 @@ async function ensureYouTubeAdSkipper(page, config = {}) {
       const elapsedSec = (Date.now() - window.__mmbAdSkipStart) / 1000;
       if (elapsedSec < minWaitSec) return { action: 'waiting', elapsedSec };
 
-      const selectors = [
+      const selectors = isMobile ? [
+        'ytm-skip-ad-renderer button',
+        '.ytp-skip-ad-button',
+        '.ytp-ad-skip-button-modern',
+        'button[aria-label*="Skip ad" i]',
+        'button[aria-label*="Skip" i]',
+      ] : [
         '.ytp-skip-ad-button',
         '.ytp-ad-skip-button-modern',
         '.ytp-ad-skip-button',
@@ -495,24 +529,36 @@ const videoWatcherPrototype = {
       }).catch(() => true);
 
       if (isPaused) {
-        const bigPlayBtn = await page.$('.ytp-large-play-button, .ytp-play-button').catch(() => null);
-        if (bigPlayBtn) {
-          await bigPlayBtn.click();
-          await sl(rd(1000, 2000));
-        } else {
+        if (isMobile) {
+          // Mobile: tap the video element directly to start playback
           const videoEl = await page.$('video').catch(() => null);
           if (videoEl) {
-            const box = await videoEl.boundingBox().catch(() => null);
-            if (box) {
-              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-              await sl(rd(1000, 2000));
-            } else {
-              await videoEl.click().catch(() => {});
-              await sl(rd(1000, 2000));
-            }
+            await videoEl.click().catch(() => {});
+            await sl(rd(1000, 2000));
           } else {
-            const player = await page.$('#movie_player, .html5-video-player, #player').catch(() => null);
+            const player = await page.$('.player-container, #player, ytm-player').catch(() => null);
             if (player) { await player.click().catch(() => {}); await sl(rd(1000, 2000)); }
+          }
+        } else {
+          const bigPlayBtn = await page.$('.ytp-large-play-button, .ytp-play-button').catch(() => null);
+          if (bigPlayBtn) {
+            await bigPlayBtn.click();
+            await sl(rd(1000, 2000));
+          } else {
+            const videoEl = await page.$('video').catch(() => null);
+            if (videoEl) {
+              const box = await videoEl.boundingBox().catch(() => null);
+              if (box) {
+                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+                await sl(rd(1000, 2000));
+              } else {
+                await videoEl.click().catch(() => {});
+                await sl(rd(1000, 2000));
+              }
+            } else {
+              const player = await page.$('#movie_player, .html5-video-player, #player').catch(() => null);
+              if (player) { await player.click().catch(() => {}); await sl(rd(1000, 2000)); }
+            }
           }
         }
       }
@@ -573,18 +619,24 @@ const videoWatcherPrototype = {
 
           if (vState.ok && vState.paused) {
             try {
-              const replayBtn = await page.$('.ytp-play-button[aria-label*="Replay" i], .ytp-play-button[title*="Replay" i]').catch(() => null);
-              if (replayBtn) {
-                this.log('info', 'Replay button visible — watch done, not restarting');
-                playCheckCancelled = true;
-                return;
-              }
-              const playBtn = await page.$('.ytp-play-button[aria-label*="Play"], .ytp-play-button[title*="Play"]').catch(() => null);
-              if (playBtn) {
-                await playBtn.click();
+              if (isMobile) {
+                // Mobile: tap video element to resume; ended check already passed above
+                const videoEl = await page.$('video').catch(() => null);
+                if (videoEl) await videoEl.click().catch(() => {});
               } else {
-                const player = await page.$('#movie_player, .html5-video-player').catch(() => null);
-                if (player) await player.click().catch(() => {});
+                const replayBtn = await page.$('.ytp-play-button[aria-label*="Replay" i], .ytp-play-button[title*="Replay" i]').catch(() => null);
+                if (replayBtn) {
+                  this.log('info', 'Replay button visible — watch done, not restarting');
+                  playCheckCancelled = true;
+                  return;
+                }
+                const playBtn = await page.$('.ytp-play-button[aria-label*="Play"], .ytp-play-button[title*="Play"]').catch(() => null);
+                if (playBtn) {
+                  await playBtn.click();
+                } else {
+                  const player = await page.$('#movie_player, .html5-video-player').catch(() => null);
+                  if (player) await player.click().catch(() => {});
+                }
               }
               this.log('info', 'Video paused tha — resume kiya');
             } catch (playErr) {
@@ -637,7 +689,8 @@ const videoWatcherPrototype = {
         }
 
         const totalElapsed = Date.now() - startTime;
-        const actualWatched = totalElapsed - totalAdTime;
+        const activeAdElapsed = adPlaying ? (Date.now() - adStartTime) : 0;
+        const actualWatched = totalElapsed - totalAdTime - activeAdElapsed;
         const remaining = durationMs - actualWatched;
 
         if (remaining <= 0) {
@@ -646,6 +699,133 @@ const videoWatcherPrototype = {
         }
 
         const progress = actualWatched / durationMs;
+
+        // ── Engagement actions — phase-independent, checked every iteration ──
+        // Bugs 10/11/12/14 fix: decoupled from phase boundaries so they always fire
+        // at the correct progress thresholds regardless of personality phase ranges.
+
+        // Like (40–60%) — mutually exclusive with dislike (Bug 12)
+        if (progress >= 0.4 && progress < 0.6 && config?.likeEnabled && !this._likedThisVideo && !this._dislikedThisVideo) {
+          const shouldLike = await this._shouldEngage('like', progress, this.currentVideo, config);
+          if (shouldLike) {
+            try {
+              const likeSel = isMobile
+                ? 'ytm-like-button-renderer button[aria-label*="like" i]:not([aria-label*="dislike" i]), button[aria-label*="like" i]:not([aria-label*="dislike" i])'
+                : 'like-button-view-model button, ytd-toggle-button-renderer#top-level-buttons-computed button:first-child, button[aria-label*="like" i]:not([aria-label*="dislike" i])';
+              const likeBtn = await page.$(likeSel);
+              if (likeBtn) {
+                const isLiked = await likeBtn.evaluate(el =>
+                  el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-label')?.toLowerCase().includes('unlike'),
+                ).catch(() => false);
+                if (!isLiked) {
+                  await humanMouseMove(page);
+                  await sl(rd(500, 1500));
+                  await likeBtn.click();
+                  this._likedThisVideo = true;
+                  this.log('info', `👍 Liked at ~${Math.round(progress * 100)}% (${isMobile ? 'mobile' : 'desktop'})`);
+                  await trackEngagement(this.profileId, 'like').catch(() => {});
+                }
+              }
+            } catch {}
+          }
+        }
+
+        // Dislike (35–50%) — mutually exclusive with like (Bug 12)
+        if (config?.dislikeEnabled && !this._dislikedThisVideo && !this._likedThisVideo && progress >= 0.35 && progress < 0.5) {
+          try {
+            const dislikeSel = isMobile
+              ? 'button[aria-label*="dislike" i]'
+              : 'like-button-view-model button:nth-of-type(2), ytd-toggle-button-renderer#top-level-buttons-computed button:nth-of-type(2), button[aria-label*="dislike" i]';
+            const dislikeBtn = await page.$(dislikeSel);
+            if (dislikeBtn) {
+              await humanMouseMove(page);
+              await sl(rd(500, 1200));
+              await dislikeBtn.click();
+              this._dislikedThisVideo = true;
+              this.log('info', `👎 Dislike clicked at ~${Math.round(progress * 100)}% (${isMobile ? 'mobile' : 'desktop'})`);
+            }
+          } catch {}
+        }
+
+        // Subscribe (>= 70%) — Bug 10 fix: was inside phase4End block (max 0.699), impossible
+        if (progress >= 0.7 && config?.subscribeEnabled && !this._subscribedThisSession) {
+          const shouldSub = await this._shouldEngage('subscribe', progress, this.currentVideo, config);
+          if (shouldSub) {
+            try {
+              const subSel = isMobile
+                ? 'ytm-subscribe-button-renderer button, .yt-spec-button-shape-next[aria-label*="Subscribe" i], button[aria-label*="Subscribe" i]:not([aria-label*="Unsubscribe" i])'
+                : '#subscribe-button button, ytd-subscribe-button-renderer button';
+              const subBtn = await page.$(subSel);
+              if (subBtn) {
+                const text = await subBtn.textContent().catch(() => '');
+                const label = await subBtn.getAttribute('aria-label').catch(() => '');
+                const alreadySub = (text && text.toLowerCase().includes('subscribed'))
+                  || (label && label.toLowerCase().includes('unsubscribe'));
+                if (!alreadySub) {
+                  await humanMouseMove(page);
+                  await sl(rd(1000, 3000));
+                  await subBtn.click();
+                  this._subscribedThisSession = true;
+                  this.log('info', `🔔 Subscribed at ~${Math.round(progress * 100)}% (${isMobile ? 'mobile' : 'desktop'})`);
+                  await trackEngagement(this.profileId, 'subscribe').catch(() => {});
+                  if (config?.bellEnabled !== false && typeof clickBellIcon === 'function') {
+                    await sl(rd(800, 1500));
+                    await clickBellIcon(page, (l, m) => this.log(l, m));
+                  }
+                }
+              }
+            } catch {}
+          }
+        }
+
+        // Comment (>= 85%) — Bug 11 fix: was inside phase5End block (max 0.839), impossible
+        const _commentAt = config?.qaTestMode ? 0.5 : 0.85;
+        if (progress >= _commentAt && config?.commentEnabled && config?.commentText && !this._commentedThisVideo) {
+          try {
+            await smoothScroll(page, pers ? pers.pickInt(400, 800) : rd(400, 800), 'down', pers);
+            await sl(rd(2000, 4000));
+            if (isMobile) {
+              const mobileCommentBox = await page.$(
+                'ytm-comment-simplebox-renderer, .comment-simplebox-content, [aria-label*="comment" i][role="textbox"], ytm-comment-section-renderer input, ytm-comment-section-renderer textarea',
+              );
+              if (mobileCommentBox) {
+                await mobileCommentBox.click();
+                await sl(rd(1000, 2000));
+                const mobileInput = await page.$(
+                  'ytm-comment-simplebox-renderer [contenteditable="true"], [id*="comment-input"], textarea[aria-label*="comment" i]',
+                ).catch(() => null) || mobileCommentBox;
+                // Ensure the actual input field is focused before typing
+                await mobileInput.click().catch(() => {});
+                await sl(rd(300, 600));
+                await humanType(page, config.commentText);
+                await sl(rd(1000, 2000));
+                const mobileSubmit = await page.$(
+                  'ytm-comment-simplebox-renderer button[aria-label*="Comment" i], ytm-comment-simplebox-renderer button:last-child, [aria-label*="Post comment" i]',
+                );
+                if (mobileSubmit) await mobileSubmit.click();
+                this._commentedThisVideo = true;
+                this.log('info', `💬 Comment posted at ~${Math.round(progress * 100)}% (mobile)`);
+                await trackEngagement(this.profileId, 'comment').catch(() => {});
+                await sl(rd(2000, 3000));
+              }
+            } else {
+              const commentBox = await page.$('#simplebox-placeholder, #placeholder-area');
+              if (commentBox) {
+                await commentBox.click();
+                await sl(rd(1000, 2000));
+                await humanType(page, config.commentText);
+                await sl(rd(1000, 2000));
+                const submitBtn = await page.$('#submit-button button, tp-yt-paper-button#submit-button');
+                if (submitBtn) await submitBtn.click();
+                this._commentedThisVideo = true;
+                this.log('info', `💬 Comment posted at ~${Math.round(progress * 100)}%`);
+                await trackEngagement(this.profileId, 'comment').catch(() => {});
+                await sl(rd(2000, 3000));
+              }
+            }
+            await smoothScroll(page, rd(400, 800), 'up');
+          } catch {}
+        }
 
         if (progress < phase1End) {
           await sl(Math.min(rd(8000, 20000), remaining));
@@ -693,35 +873,12 @@ const videoWatcherPrototype = {
             await smoothScroll(page, px + (pers ? pers.pickInt(50, 200) : rd(50, 200)), 'up', pers);
             await sl(rd(500, 1500));
           } else if (config?.scrollDuringWatch !== false && pers.chance(commentScrollChance * 0.5)) {
-            await smoothScroll(page, scrollAmount, 'down', pers);
+            const scrollDown = pers ? pers.pickInt(160, 480) : rd(160, 480);
+            const scrollUp = Math.round(scrollDown * (0.6 + Math.random() * 0.5));
+            await smoothScroll(page, scrollDown, 'down', pers);
             await sl(rd(1500, 4000));
             if (humanOn) await hoverRelatedVideos(page, (l, m) => this.log(l, m));
-            await smoothScroll(page, scrollAmount, 'up', pers);
-          }
-
-          if (progress >= 0.4 && progress < 0.6 && config?.likeEnabled && !this._likedThisVideo) {
-            const shouldLike = await this._shouldEngage('like', progress, this.currentVideo, config);
-            if (shouldLike) {
-              try {
-                const likeSel = isMobile
-                  ? 'ytm-like-button-renderer button[aria-label*="like" i]:not([aria-label*="dislike" i]), button[aria-label*="like" i]:not([aria-label*="dislike" i])'
-                  : 'like-button-view-model button, ytd-toggle-button-renderer#top-level-buttons-computed button:first-child, button[aria-label*="like" i]:not([aria-label*="dislike" i])';
-                const likeBtn = await page.$(likeSel);
-                if (likeBtn) {
-                  const isLiked = await likeBtn.evaluate(el =>
-                    el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-label')?.toLowerCase().includes('unlike'),
-                  ).catch(() => false);
-                  if (!isLiked) {
-                    await humanMouseMove(page);
-                    await sl(rd(500, 1500));
-                    await likeBtn.click();
-                    this._likedThisVideo = true;
-                    this.log('info', `👍 Liked at ~50% (${isMobile ? 'mobile' : 'desktop'})`);
-                    await trackEngagement(this.profileId, 'like').catch(() => {});
-                  }
-                }
-              } catch {}
-            }
+            await smoothScroll(page, scrollUp, 'up', pers);
           }
 
           const seekMax = config?.seekForwardMax ?? 2;
@@ -756,27 +913,6 @@ const videoWatcherPrototype = {
             }
           }
 
-          if (
-            config?.dislikeEnabled
-            && !this._dislikedThisVideo
-            && progress >= 0.35
-            && progress < 0.5
-          ) {
-            try {
-              const dislikeSel = isMobile
-                ? 'button[aria-label*="dislike" i]'
-                : 'like-button-view-model button:nth-of-type(2), ytd-toggle-button-renderer#top-level-buttons-computed button:nth-of-type(2), button[aria-label*="dislike" i]';
-              const dislikeBtn = await page.$(dislikeSel);
-              if (dislikeBtn) {
-                await humanMouseMove(page);
-                await sl(rd(500, 1200));
-                await dislikeBtn.click();
-                this._dislikedThisVideo = true;
-                this.log('info', `👎 Dislike clicked (${isMobile ? 'mobile' : 'desktop'})`);
-              }
-            } catch {}
-          }
-
           await sl(Math.min(rd(15000, 35000), remaining));
           continue;
         }
@@ -788,37 +924,6 @@ const videoWatcherPrototype = {
             await page.mouse.move(x, y, { steps: rd(8, 20) }).catch(() => {});
           }
 
-          if (progress >= 0.7 && config?.subscribeEnabled && !this._subscribedThisSession) {
-            const shouldSub = await this._shouldEngage('subscribe', progress, this.currentVideo, config);
-            if (shouldSub) {
-              try {
-                const subSel = isMobile
-                  ? 'ytm-subscribe-button-renderer button, .yt-spec-button-shape-next[aria-label*="Subscribe" i], button[aria-label*="Subscribe" i]:not([aria-label*="Unsubscribe" i])'
-                  : '#subscribe-button button, ytd-subscribe-button-renderer button';
-                const subBtn = await page.$(subSel);
-                if (subBtn) {
-                  const text = await subBtn.textContent().catch(() => '');
-                  const label = await subBtn.getAttribute('aria-label').catch(() => '');
-                  const alreadySub = (text && text.toLowerCase().includes('subscribed'))
-                    || (label && label.toLowerCase().includes('unsubscribe'));
-                  if (!alreadySub) {
-                    await humanMouseMove(page);
-                    await sl(rd(1000, 3000));
-                    await subBtn.click();
-                    this._subscribedThisSession = true;
-                    this.log('info', `🔔 Subscribed at ~70% (${isMobile ? 'mobile' : 'desktop'})`);
-                    await trackEngagement(this.profileId, 'subscribe').catch(() => {});
-                    // Bell icon click after subscribe (if enabled)
-                    if (config?.bellEnabled !== false && typeof clickBellIcon === 'function') {
-                      await sl(rd(800, 1500));
-                      await clickBellIcon(page, (l, m) => this.log(l, m));
-                    }
-                  }
-                }
-              } catch {}
-            }
-          }
-
           await sl(Math.min(rd(12000, 28000), remaining));
           continue;
         }
@@ -826,64 +931,11 @@ const videoWatcherPrototype = {
         if (progress < phase5End) {
           const peekPlan = planWatchAction(progress, config, 5, pers);
           if (peekPlan.scroll || (config?.scrollDuringWatch !== false && pers.chance(relatedPeekChance))) {
-            const peekPx = peekPlan.intensity || (pers ? pers.pickInt(100, 300) : rd(100, 300));
-            await smoothScroll(page, peekPx, 'down', pers);
+            const peekDown = peekPlan.intensity || (pers ? pers.pickInt(100, 300) : rd(100, 300));
+            const peekUp = Math.round(peekDown * (0.55 + Math.random() * 0.55));
+            await smoothScroll(page, peekDown, 'down', pers);
             await sl(peekPlan.pauseMs || rd(1500, 4000));
-            await smoothScroll(page, peekPx, 'up', pers);
-          }
-
-          const commentAt = config?.qaTestMode ? 0.5 : 0.85;
-          if (
-            progress >= commentAt
-            && config?.commentEnabled
-            && config?.commentText
-            && !this._commentedThisVideo
-          ) {
-            try {
-              await smoothScroll(page, pers ? pers.pickInt(400, 800) : rd(400, 800), 'down', pers);
-              await sl(rd(2000, 4000));
-
-              if (isMobile) {
-                // Mobile comment flow — tap the comment box, type, submit
-                const mobileCommentBox = await page.$(
-                  'ytm-comment-simplebox-renderer, .comment-simplebox-content, [aria-label*="comment" i][role="textbox"], ytm-comment-section-renderer input, ytm-comment-section-renderer textarea',
-                );
-                if (mobileCommentBox) {
-                  await mobileCommentBox.click();
-                  await sl(rd(1000, 2000));
-                  // After tap, the full comment input should appear
-                  const mobileInput = await page.$(
-                    'ytm-comment-simplebox-renderer [contenteditable="true"], [id*="comment-input"], textarea[aria-label*="comment" i]',
-                  ).catch(() => null) || mobileCommentBox;
-                  await mobileInput.type(config.commentText, { delay: rd(40, 80) });
-                  await sl(rd(1000, 2000));
-                  const mobileSubmit = await page.$(
-                    'ytm-comment-simplebox-renderer button[aria-label*="Comment" i], ytm-comment-simplebox-renderer button:last-child, [aria-label*="Post comment" i]',
-                  );
-                  if (mobileSubmit) await mobileSubmit.click();
-                  this._commentedThisVideo = true;
-                  this.log('info', '💬 Comment posted at ~85% (mobile)');
-                  await trackEngagement(this.profileId, 'comment').catch(() => {});
-                  await sl(rd(2000, 3000));
-                }
-              } else {
-                // Desktop comment flow
-                const commentBox = await page.$('#simplebox-placeholder, #placeholder-area');
-                if (commentBox) {
-                  await commentBox.click();
-                  await sl(rd(1000, 2000));
-                  await humanType(page, config.commentText);
-                  await sl(rd(1000, 2000));
-                  const submitBtn = await page.$('#submit-button button, tp-yt-paper-button#submit-button');
-                  if (submitBtn) await submitBtn.click();
-                  this._commentedThisVideo = true;
-                  this.log('info', '💬 Comment posted at ~85%');
-                  await trackEngagement(this.profileId, 'comment').catch(() => {});
-                  await sl(rd(2000, 3000));
-                }
-              }
-              await smoothScroll(page, rd(400, 800), 'up');
-            } catch {}
+            await smoothScroll(page, peekUp, 'up', pers);
           }
 
           await sl(Math.min(rd(15000, 30000), remaining));

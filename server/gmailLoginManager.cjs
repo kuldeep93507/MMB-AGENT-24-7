@@ -438,6 +438,12 @@ class GmailLoginManager {
     return this._queue.find(e => e.profileId === profileId) || null;
   }
 
+  /** Returns the Gmail status string for a profileId, or null if not tracked. */
+  getProfileGmailStatus(profileId) {
+    const entry = this._findEntry(profileId);
+    return entry ? entry.status : null;
+  }
+
   _log(level, message) {
     const entry = { time: new Date().toISOString(), level, message };
     this._logs.push(entry);

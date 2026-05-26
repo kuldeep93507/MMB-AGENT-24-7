@@ -52,8 +52,21 @@ async function humanMouseMove(page) {
   await sleep(randomDelay(100, 300));
 }
 
-/** Human-like scroll: eased steps (curve), not one straight wheel dump. */
+/** Human-like scroll: eased steps on desktop, JS scrollBy on mobile (mouse.wheel breaks touch profiles). */
 async function smoothScroll(page, totalPixels, direction = 'down', personality = null) {
+  const isMobile = page.url().includes('m.youtube.com');
+
+  if (isMobile) {
+    // Mobile: mouse.wheel() doesn't work for touch-UA profiles — use JS scrollBy instead
+    const px = direction === 'down' ? Math.abs(totalPixels) : -Math.abs(totalPixels);
+    await page.evaluate((scrollPx) => {
+      window.scrollBy({ top: scrollPx, behavior: 'smooth' });
+    }, px).catch(() => {});
+    await sleep(randomDelay(300, 700));
+    return;
+  }
+
+  // Desktop: eased mouse wheel steps
   const steps = personality
     ? personality.pickInt(personality.scrollStepsMin, personality.scrollStepsMax)
     : randomDelay(8, 16);

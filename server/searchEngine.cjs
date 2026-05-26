@@ -760,48 +760,57 @@ async function searchChannelPage(page, videoTitle, channelName, expectedDuration
 // HELPERS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-// Type in YouTube search bar (multiple fallback methods)
+// Type in YouTube search bar (multiple fallback methods, up to 3 attempts)
 async function typeInSearchBar(page, query, humanTypeFn) {
-  // Method 1: '/' shortcut
-  try {
-    await page.keyboard.press('/');
-    await sleep(600);
-    const focused = await page.evaluate(() => document.activeElement?.id === 'search' || document.activeElement?.tagName === 'INPUT');
-    if (focused) {
-      await page.keyboard.press('Control+a');
-      await sleep(100);
-      await page.keyboard.press('Backspace');
-      await sleep(200);
-      await humanTypeFn(page, query);
-      return true;
-    }
-  } catch {}
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    // Wait for search bar to be present before trying (catches slow page loads)
+    await page.waitForSelector('input#search, #search-icon-legacy, button[aria-label="Search"]', { timeout: 3000 }).catch(() => {});
 
-  // Method 2: Click input
-  try {
-    const input = await page.$('input#search');
-    if (input) {
-      await input.click();
-      await sleep(400);
-      await page.keyboard.press('Control+a');
-      await sleep(100);
-      await page.keyboard.press('Backspace');
-      await sleep(200);
-      await humanTypeFn(page, query);
-      return true;
-    }
-  } catch {}
-
-  // Method 3: Click search icon
-  try {
-    const btn = await page.$('#search-icon-legacy, button[aria-label="Search"]');
-    if (btn) {
-      await btn.click();
+    // Method 1: '/' shortcut
+    try {
+      await page.keyboard.press('/');
       await sleep(600);
-      await humanTypeFn(page, query);
-      return true;
+      const focused = await page.evaluate(() => document.activeElement?.id === 'search' || document.activeElement?.tagName === 'INPUT');
+      if (focused) {
+        await page.keyboard.press('Control+a');
+        await sleep(100);
+        await page.keyboard.press('Backspace');
+        await sleep(200);
+        await humanTypeFn(page, query);
+        return true;
+      }
+    } catch {}
+
+    // Method 2: Click input
+    try {
+      const input = await page.$('input#search');
+      if (input) {
+        await input.click();
+        await sleep(400);
+        await page.keyboard.press('Control+a');
+        await sleep(100);
+        await page.keyboard.press('Backspace');
+        await sleep(200);
+        await humanTypeFn(page, query);
+        return true;
+      }
+    } catch {}
+
+    // Method 3: Click search icon
+    try {
+      const btn = await page.$('#search-icon-legacy, button[aria-label="Search"]');
+      if (btn) {
+        await btn.click();
+        await sleep(600);
+        await humanTypeFn(page, query);
+        return true;
+      }
+    } catch {}
+
+    if (attempt < 3) {
+      await sleep(1500); // brief wait before retry — page may still be loading
     }
-  } catch {}
+  }
 
   return false;
 }
@@ -1171,71 +1180,15 @@ async function openVideoSmart(page, videoTitle, channelName, videoUrl, expectedD
 
   let result = await runPrimaryTrafficSource(page, source, ctx);
 
-  // Exact full-title YouTube retry (helps when escalation queries miss)
-  if (!strictSource && (!result || !result.success) && isYouTubeSearchFamily(source)) {
-    log('info', '[Traffic] Primary YouTube searches failed — trying EXACT FULL TITLE...');
+  // Step 2: Exact title + channel name search on YouTube (guaranteed hit rate).
+  // Runs when primary source failed — regardless of whether primary was YouTube or external.
+  // External sources (Google/Bing/DDG/Yahoo) get ONE YouTube fallback, not a cascade of all engines.
+  if (!strictSource && (!result || !result.success) && source !== 'direct') {
+    log('info', `[Fallback] "${source}" failed — trying EXACT TITLE + CHANNEL on YouTube...`);
     try {
       result = await searchYouTubeFullTitle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId);
     } catch (err) {
-      log('warn', `[Traffic] Full title search error: ${err.message}`);
-    }
-  }
-
-  // Legacy fallback: try every search surface before giving up (strict skips whole chain + last direct).
-  // Order matches server 2 old: YouTube Search → Google → Bing → DuckDuckGo → Yahoo → Channel Page
-  if (strictSource && (!result || !result.success)) {
-    log('warn', `[QA] Strict traffic: "${source}" failed — skipping fallback chain`);
-  }
-
-  if (!strictSource && (!result || !result.success)) {
-    const ytFbOpts = {
-      maxAttempts: 6,
-      ...(options.searchQuerySeed ? { searchQuerySeed: options.searchQuerySeed } : {}),
-    };
-    const fallbackOrder = [
-      {
-        id: 'youtube-search',
-        fn: () => searchYouTube(page, videoTitle, channelName, expectedDuration, humanTypeFn, log, expectedVideoId, ytFbOpts),
-      },
-      {
-        id: 'google',
-        fn: () => searchGoogle(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
-      },
-      {
-        id: 'bing',
-        fn: () => searchBing(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
-      },
-      {
-        id: 'duckduckgo',
-        fn: () => searchDuckDuckGo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
-      },
-      {
-        id: 'yahoo',
-        fn: () => searchYahoo(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
-      },
-      {
-        id: 'channel-page',
-        fn: () => searchChannelPage(page, videoTitle, channelName, expectedDuration, humanTypeFn, log),
-      },
-    ].filter((f) => f.id !== source);
-
-    log(
-      'info',
-      `[Fallback] "${source}" failed — trying ${fallbackOrder.length} more sources before last-resort direct URL...`,
-    );
-
-    for (const fallback of fallbackOrder) {
-      log('info', `[Fallback] Trying: ${fallback.id}`);
-      try {
-        result = await fallback.fn();
-        if (result && result.success) {
-          log('success', `[Fallback] Found via ${fallback.id} ✓`);
-          break;
-        }
-      } catch (err) {
-        log('warn', `[Fallback] ${fallback.id} error: ${err.message}`);
-      }
-      await sleep(randomDelay(1000, 2000));
+      log('warn', `[Fallback] Exact title search error: ${err.message}`);
     }
   }
 
