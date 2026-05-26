@@ -1,22 +1,20 @@
 const { app, BrowserWindow, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
 
-// Icon path — safe fallback if file missing
+// Icon — safe fallback if file missing
 const ICON_PATH = path.join(__dirname, 'icon.png');
 const appIcon = fs.existsSync(ICON_PATH) ? ICON_PATH : undefined;
 
 let mainWindow = null;
 let splashWindow = null;
-let backendProcess = null;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // SPLASH SCREEN — Animated MMB Logo
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function createSplashWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
-  
+
   splashWindow = new BrowserWindow({
     width: 500,
     height: 400,
@@ -48,7 +46,7 @@ function createMainWindow() {
     height: Math.min(900, height - 100),
     minWidth: 1000,
     minHeight: 700,
-    show: false, // Don't show until ready
+    show: false,
     frame: true,
     title: 'MMB Agent 24/7',
     icon: appIcon,
@@ -58,7 +56,7 @@ function createMainWindow() {
     },
   });
 
-  // Load the Vite dev server or built files
+  // Dev: load Vite dev server | Prod: load built index.html
   const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
   if (isDev) {
     mainWindow.loadURL('http://localhost:5178');
@@ -69,7 +67,6 @@ function createMainWindow() {
   mainWindow.setMenuBarVisibility(false);
 
   mainWindow.once('ready-to-show', () => {
-    // Close splash and show main window
     setTimeout(() => {
       if (splashWindow) {
         splashWindow.close();
@@ -77,54 +74,46 @@ function createMainWindow() {
       }
       mainWindow.show();
       mainWindow.focus();
-    }, 1000); // Extra 1s after page loads
+    }, 1000);
   });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
-    // Stop backend when window closes
-    if (backendProcess) {
-      backendProcess.kill();
-      backendProcess = null;
-    }
   });
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// START BACKEND SERVER
+// START BACKEND — runs inside Electron's Node.js
+// No system Node.js installation needed on any PC
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function startBackend() {
-  // In packaged app: server is in extraResources → real filesystem at process.resourcesPath/server/
-  // In dev: server is at project root/server/
+  // Packaged app: server is in extraResources (real filesystem, writable)
+  // Dev: server is at project root/server/
   const serverPath = app.isPackaged
     ? path.join(process.resourcesPath, 'server', 'index.cjs')
     : path.join(__dirname, '..', 'server', 'index.cjs');
 
-  // cwd must also be outside asar so server can write user-settings.json, logs, etc.
-  const serverCwd = app.isPackaged
-    ? process.resourcesPath
-    : path.join(__dirname, '..');
+  console.log('[Electron] Loading backend:', serverPath);
+  console.log('[Electron] Using Electron built-in Node.js — no system Node.js needed');
 
-  console.log(`[Electron] Starting backend: ${serverPath}`);
-  console.log(`[Electron] Backend cwd: ${serverCwd}`);
+  // Intercept process.exit() so server shutdown doesn't kill Electron abruptly
+  // Instead, route it through app.quit() for clean window teardown
+  const _realExit = process.exit.bind(process);
+  process.exit = (code) => {
+    console.log(`[Electron] Server called process.exit(${code ?? 0}) — routing to app.quit()`);
+    app.quit();
+    // Hard exit after 3s if app.quit() hangs
+    setTimeout(() => _realExit(code ?? 0), 3000);
+  };
 
-  backendProcess = spawn('node', [serverPath], {
-    cwd: serverCwd,
-    stdio: 'pipe',
-    env: { ...process.env, NODE_ENV: 'production' },
-  });
-
-  backendProcess.stdout.on('data', (data) => {
-    console.log(`[Backend] ${data.toString().trim()}`);
-  });
-
-  backendProcess.stderr.on('data', (data) => {
-    console.error(`[Backend Error] ${data.toString().trim()}`);
-  });
-
-  backendProcess.on('close', (code) => {
-    console.log(`[Backend] Process exited with code ${code}`);
-  });
+  try {
+    require(serverPath);
+    console.log('[Electron] Backend server running inside Electron process');
+  } catch (err) {
+    console.error('[Electron] Backend failed to load:', err.message);
+    // Show error and quit after a moment so user can see the log
+    setTimeout(() => app.quit(), 3000);
+  }
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -133,27 +122,21 @@ function startBackend() {
 app.whenReady().then(() => {
   // 1. Show splash
   createSplashWindow();
-  
-  // 2. Start backend
+
+  // 2. Load backend server into this process (no spawn needed)
   startBackend();
-  
-  // 3. Wait for backend to be ready, then show main window
+
+  // 3. Give server 3s to initialise, then show main window
   setTimeout(() => {
     createMainWindow();
-  }, 3000); // Give backend 3s to start
+  }, 3000);
 });
 
 app.on('window-all-closed', () => {
-  if (backendProcess) {
-    backendProcess.kill();
-    backendProcess = null;
-  }
   app.quit();
 });
 
 app.on('before-quit', () => {
-  if (backendProcess) {
-    backendProcess.kill();
-    backendProcess = null;
-  }
+  // Trigger server's graceful shutdown (SIGTERM handler in index.cjs)
+  try { process.emit('SIGTERM'); } catch { /* ignore */ }
 });
