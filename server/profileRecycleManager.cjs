@@ -129,6 +129,8 @@ class ProfileRecycleManager {
           errorRetries: s.errorRetries || 0,
           enabled: s.enabled !== false,
           isPaused: s.isPaused || false,
+          // Bug 4 fix: persist Gmail lock status so it survives app restart
+          persistedGmailStatus: s.persistedGmailStatus || null,
         })),
       };
       fs.writeFileSync(RECYCLE_FILE, JSON.stringify(payload, null, 2));
@@ -151,7 +153,8 @@ class ProfileRecycleManager {
     this._queueTimer = setInterval(() => {
       if (!this.enabled) return;
       for (const slot of this.slots.values()) {
-        if (slot.enabled === false) continue;
+        // Bug 6 fix: skip paused slots — don't auto-start or cooldown-expire them
+        if (slot.enabled === false || slot.isPaused) continue;
         if (slot.status === 'error') {
           this._recoverErrorSlot(slot).catch(() => {});
         } else if (slot.status === 'queued' || slot.status === 'idle') {
@@ -234,9 +237,24 @@ class ProfileRecycleManager {
     this.cooldownMinMs = Math.max(1, cooldownMinMinutes || 10) * 60 * 1000;
     this.cooldownMaxMs = Math.max(this.cooldownMinMs, (cooldownMaxMinutes || 30) * 60 * 1000);
 
+    // Build a set of incoming profile IDs so we can disable old slots later (Bug 2 fix)
+    const incomingProfileIds = new Set(profiles.map((p) => String(p.id)));
+
     for (const p of profiles) {
-      const slotId = String(p.name || p.id);
-      const existing = this.slots.get(slotId);
+      // Bug 3 fix: use profileId UUID as slotId — prevents collision when two profiles share a name
+      const slotId = String(p.id);
+
+      // Migration: if an older name-based slot exists for this profile, carry over its history
+      // then remove the old entry so we don't have duplicates
+      const legacySlotId = String(p.name || p.id);
+      const legacySlot = legacySlotId !== slotId ? this.slots.get(legacySlotId) : null;
+      if (legacySlot && legacySlot.currentProfileId === p.id) {
+        this.slots.delete(legacySlotId);
+        this.profileToSlot.delete(legacySlot.currentProfileId);
+        this._log('info', `${p.name || p.id} — migrated slotId from name → profileId`);
+      }
+
+      const existing = this.slots.get(slotId) || legacySlot;
       const wasRunning = existing?.status === 'running' || this._isWorkerActive(existing?.currentProfileId || p.id);
       const slot = {
         slotId,
@@ -251,10 +269,20 @@ class ProfileRecycleManager {
         lastError: null,
         errorRetries: 0,
         enabled: true,
+        isPaused: false,
         assignment: wasRunning ? existing?.assignment : null,
       };
       this.slots.set(slotId, slot);
       this.profileToSlot.set(p.id, slotId);
+    }
+
+    // Bug 2 fix: disable slots that are NOT in the new profile selection
+    // (previously these would keep running forever after a "restart with fewer profiles")
+    for (const slot of this.slots.values()) {
+      if (!incomingProfileIds.has(slot.currentProfileId) && slot.enabled !== false) {
+        this._log('info', `${slot.profileName} — not in new selection, disabling slot`);
+        this._stopSlot(slot, /* keepInMap */ true);
+      }
     }
 
     this._saveState();
@@ -313,6 +341,11 @@ class ProfileRecycleManager {
       const slot = this.slots.get(slotId);
       if (!slot || slot.status !== 'cooldown') {
         this._log('warn', `Cooldown fired for ${slotId} but slot is ${slot?.status || 'missing'} — skipped`);
+        return;
+      }
+      // Bug 6 fix: if slot is paused, do NOT call _afterCooldown (would trigger profile recreate)
+      if (slot.isPaused) {
+        this._log('info', `${slot.profileName} — cooldown fired but slot is paused, skipping recreate`);
         return;
       }
       if (slot.cooldownUntil && slot.cooldownUntil > Date.now()) {
@@ -465,14 +498,22 @@ class ProfileRecycleManager {
     }
 
     // Guard: skip recreate if Gmail is locked — manual fix needed first
+    // Bug 4 fix: check both live in-memory status AND persisted status (survives app restart)
     const LOCKED_GMAIL_STATUSES = ['blocked', 'needs_phone', 'captcha', 'wrong_password'];
-    const gmailStatus = gmailLoginManager.getProfileGmailStatus(slot.currentProfileId);
-    if (gmailStatus && LOCKED_GMAIL_STATUSES.includes(gmailStatus)) {
+    const liveGmailStatus = gmailLoginManager.getProfileGmailStatus(slot.currentProfileId);
+    const effectiveGmailStatus = liveGmailStatus || slot.persistedGmailStatus || null;
+    if (effectiveGmailStatus && LOCKED_GMAIL_STATUSES.includes(effectiveGmailStatus)) {
+      // Persist so the block survives the next restart too
+      slot.persistedGmailStatus = effectiveGmailStatus;
       slot.status = 'error';
-      slot.lastError = `Gmail locked (${gmailStatus}) — fix Gmail first, then restart slot`;
+      slot.lastError = `Gmail locked (${effectiveGmailStatus}) — fix Gmail first, then restart slot`;
       this._saveState();
-      this._log('error', `${slot.profileName} — recreate skipped: Gmail status is "${gmailStatus}". Resolve manually.`);
+      this._log('error', `${slot.profileName} — recreate skipped: Gmail status is "${effectiveGmailStatus}". Resolve manually.`);
       return;
+    }
+    // Clear any stale persisted lock if Gmail is now OK
+    if (slot.persistedGmailStatus && liveGmailStatus && !LOCKED_GMAIL_STATUSES.includes(liveGmailStatus)) {
+      slot.persistedGmailStatus = null;
     }
 
     slot.status = 'recreating';
@@ -638,9 +679,17 @@ class ProfileRecycleManager {
     for (const slot of this.slots.values()) {
       if (slot.enabled === false || !slot.isPaused) continue;
       slot.isPaused = false;
-      slot.cooldownUntil = Date.now() + 2000; // 2s delay before start
-      // Schedule immediate cooldown expiry
-      this._scheduleCooldown(slot.slotId, 2000);
+      slot.cooldownUntil = null;
+      slot.status = 'idle';
+      // Bug 6 fix: call _tryRunSlot directly — NOT _scheduleCooldown → _afterCooldown
+      // _afterCooldown deletes + recreates the profile; _tryRunSlot just starts a worker
+      // with the EXISTING profile. Resume must NEVER recreate the profile.
+      this._tryRunSlot(slot).catch((err) => {
+        slot.status = 'error';
+        slot.lastError = err.message;
+        this._saveState();
+        this._log('error', `${slot.profileName} resume run failed: ${err.message}`);
+      });
     }
     this._saveState();
     return this.getStatus();
@@ -656,6 +705,19 @@ class ProfileRecycleManager {
     const slot = this.slots.get(slotId);
     if (!slot || !this.enabled || slot.enabled === false) return;
     if (slot.status === 'recreating') return; // already in progress
+
+    // Bug 5 fix: check Gmail lock BEFORE kicking off recreate — avoids wasting a recreate cycle
+    const LOCKED_GMAIL_STATUSES = ['blocked', 'needs_phone', 'captcha', 'wrong_password'];
+    const liveGmailStatus = gmailLoginManager.getProfileGmailStatus(slot.currentProfileId);
+    const effectiveGmailStatus = liveGmailStatus || slot.persistedGmailStatus || null;
+    if (effectiveGmailStatus && LOCKED_GMAIL_STATUSES.includes(effectiveGmailStatus)) {
+      slot.persistedGmailStatus = effectiveGmailStatus;
+      slot.status = 'error';
+      slot.lastError = `Gmail locked (${effectiveGmailStatus}) — fix Gmail first, then restart slot`;
+      this._saveState();
+      this._log('error', `${slot.profileName} — immediateRecreate blocked: Gmail "${effectiveGmailStatus}". Resolve manually.`);
+      return;
+    }
 
     this._log('warn', `${slot.profileName} — sign-in wall detected, scheduling immediate recreate`);
 
