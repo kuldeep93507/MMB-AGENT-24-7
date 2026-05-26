@@ -58,9 +58,12 @@ export default function SettingsPage() {
   const [emptyingTrash, setEmptyingTrash] = useState(false);
   const [trashActionMsg, setTrashActionMsg] = useState<string | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
-  // Real cookie import state
+  // Real cookie pool state
+  type CookieSet = { id: string; label: string; count: number; importedAt: number | null; domains?: string[] };
+  type CookiePoolStatus = { hasCookies: boolean; poolSize: number; sets: CookieSet[] };
   const [cookieJson, setCookieJson] = useState('');
-  const [cookieStatus, setCookieStatus] = useState<{ hasCookies: boolean; count: number; importedAt: number | null; domains?: string[] } | null>(null);
+  const [cookieLabel, setCookieLabel] = useState('');
+  const [cookiePool, setCookiePool] = useState<CookiePoolStatus | null>(null);
   const [cookieSaving, setCookieSaving] = useState(false);
   const [cookieMsg, setCookieMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const providerSynced = useRef(false);
@@ -73,7 +76,7 @@ export default function SettingsPage() {
   const refreshCookieStatus = useCallback(async () => {
     try {
       const res = await backendFetch('/api/cookies/status', { headers: getAuthHeaders() });
-      if (res.ok) setCookieStatus(await res.json());
+      if (res.ok) setCookiePool(await res.json());
     } catch { /* ignore */ }
   }, []);
 
@@ -836,71 +839,92 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* Real Cookie Import */}
+        {/* Real Cookie Pool */}
         <Section
-          title="Real Cookie Import (Anti-Bot)"
+          title="Cookie Pool (Anti-Bot)"
           icon={<LogIn size={15} className="text-green-400" />}
-          note="Import real cookies from your Chrome browser. These cookies are automatically injected into every new profile — making it look like a real, trusted user to YouTube."
+          note="Add multiple real cookie sets from different Chrome sessions. Each new profile gets a randomly assigned set — so no two profiles share the same cookies."
         >
           <div className="space-y-4">
-            {/* Status bar */}
-            <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border ${cookieStatus?.hasCookies ? 'bg-green-950/40 border-green-700/50' : 'bg-gray-800/60 border-gray-700'}`}>
-              {cookieStatus?.hasCookies
+
+            {/* Pool status */}
+            <div className={`flex items-center gap-3 px-4 py-3 rounded-xl border ${cookiePool?.hasCookies ? 'bg-green-950/40 border-green-700/50' : 'bg-gray-800/60 border-gray-700'}`}>
+              {cookiePool?.hasCookies
                 ? <CheckCircle2 size={16} className="text-green-400 shrink-0" />
                 : <XCircle size={16} className="text-gray-500 shrink-0" />}
               <div className="flex-1 min-w-0">
-                {cookieStatus?.hasCookies ? (
-                  <p className="text-sm text-green-300 font-medium">
-                    {cookieStatus.count} cookies saved
-                    {cookieStatus.importedAt ? ` · imported ${new Date(cookieStatus.importedAt).toLocaleDateString('en-IN')}` : ''}
-                  </p>
-                ) : (
-                  <p className="text-sm text-gray-400">No cookies saved — profiles will use default empty state</p>
-                )}
-                {cookieStatus?.domains && cookieStatus.domains.length > 0 && (
-                  <p className="text-xs text-gray-500 truncate mt-0.5">Domains: {cookieStatus.domains.join(', ')}</p>
-                )}
+                {cookiePool?.hasCookies
+                  ? <p className="text-sm text-green-300 font-medium">{cookiePool.poolSize} cookie set{cookiePool.poolSize !== 1 ? 's' : ''} in pool — profiles get randomly assigned one each</p>
+                  : <p className="text-sm text-gray-400">Pool empty — add at least 1 set (3–5 recommended for variety)</p>}
               </div>
-              {cookieStatus?.hasCookies && (
-                <button
-                  type="button"
+              {cookiePool?.hasCookies && (
+                <button type="button"
                   className="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded border border-red-800/40 hover:border-red-600/60 shrink-0"
                   onClick={async () => {
                     await backendFetch('/api/cookies/clear', { method: 'DELETE', headers: getAuthHeaders() });
-                    setCookieStatus({ hasCookies: false, count: 0, importedAt: null });
-                    setCookieMsg({ ok: true, text: 'Cookies cleared.' });
+                    await refreshCookieStatus();
+                    setCookieMsg({ ok: true, text: 'Pool cleared.' });
                     setTimeout(() => setCookieMsg(null), 3000);
-                  }}
-                >Clear</button>
+                  }}>Clear All</button>
               )}
             </div>
 
-            {/* How to export */}
+            {/* Existing sets list */}
+            {cookiePool && cookiePool.sets.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs text-gray-500 font-medium">Sets in pool:</p>
+                {cookiePool.sets.map(s => (
+                  <div key={s.id} className="flex items-center gap-3 bg-gray-800/50 border border-gray-700/60 rounded-xl px-3 py-2">
+                    <CheckCircle2 size={13} className="text-green-500 shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-white font-medium">{s.label}</p>
+                      <p className="text-xs text-gray-500">
+                        {s.count} cookies
+                        {s.domains && s.domains.length > 0 ? ` · ${s.domains.join(', ')}` : ''}
+                        {s.importedAt ? ` · ${new Date(s.importedAt).toLocaleDateString('en-IN')}` : ''}
+                      </p>
+                    </div>
+                    <button type="button"
+                      className="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded border border-red-800/30 hover:border-red-600/50 shrink-0"
+                      onClick={async () => {
+                        await backendFetch(`/api/cookies/set/${s.id}`, { method: 'DELETE', headers: getAuthHeaders() });
+                        await refreshCookieStatus();
+                      }}>Remove</button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* How to guide */}
             <div className="bg-gray-800/40 border border-gray-700/50 rounded-xl p-4 text-xs text-gray-400 space-y-1">
-              <p className="text-gray-300 font-medium mb-2">How to export from Chrome:</p>
-              <p>1. Install <span className="text-white">Cookie-Editor</span> extension from Chrome Web Store (free)</p>
-              <p>2. Open Chrome → visit <span className="text-white">youtube.com</span> &amp; <span className="text-white">google.com</span> → browse 5–10 min normally</p>
-              <p>3. Click Cookie-Editor icon → <span className="text-white">Export → JSON</span></p>
-              <p>4. Paste the JSON below → Save</p>
+              <p className="text-gray-300 font-medium mb-2">How to add a set (do this 3–5 times from different Chrome profiles):</p>
+              <p>1. Chrome → <span className="text-white">Cookie-Editor</span> extension (Chrome Web Store, free)</p>
+              <p>2. Open a Chrome profile → visit <span className="text-white">youtube.com</span> → browse 5 min</p>
+              <p>3. Cookie-Editor → <span className="text-white">Export → JSON</span> → copy</p>
+              <p>4. Paste below, give it a name, click <span className="text-white">Add to Pool</span></p>
+              <p>5. Repeat with a <span className="text-white">different Chrome profile</span> for more variety</p>
             </div>
 
-            {/* JSON paste area */}
-            <div>
-              <label className="text-gray-400 text-xs font-medium block mb-2">Paste Cookie JSON here</label>
+            {/* Add new set form */}
+            <div className="space-y-3 bg-gray-800/30 border border-gray-700/40 rounded-xl p-4">
+              <p className="text-xs text-gray-400 font-medium">Add new cookie set to pool:</p>
+              <input
+                type="text"
+                className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-gray-500 placeholder-gray-600"
+                placeholder='Set name (e.g. "Chrome Profile 2" or "Team Member 1")'
+                value={cookieLabel}
+                onChange={e => setCookieLabel(e.target.value)}
+              />
               <textarea
                 className="w-full bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-xs text-gray-300 font-mono resize-none focus:outline-none focus:border-gray-500 placeholder-gray-600"
-                rows={6}
+                rows={5}
                 placeholder={'[\n  { "name": "CONSENT", "value": "YES+...", "domain": ".youtube.com", ... },\n  ...\n]'}
                 value={cookieJson}
                 onChange={e => setCookieJson(e.target.value)}
               />
-            </div>
-
-            {cookieMsg && (
-              <p className={`text-xs font-medium ${cookieMsg.ok ? 'text-green-400' : 'text-red-400'}`}>{cookieMsg.text}</p>
-            )}
-
-            <div className="flex gap-3">
+              {cookieMsg && (
+                <p className={`text-xs font-medium ${cookieMsg.ok ? 'text-green-400' : 'text-red-400'}`}>{cookieMsg.text}</p>
+              )}
               <button
                 type="button"
                 disabled={cookieSaving || !cookieJson.trim()}
@@ -914,24 +938,25 @@ export default function SettingsPage() {
                     const res = await backendFetch('/api/cookies/import', {
                       method: 'POST',
                       headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ cookies: arr }),
+                      body: JSON.stringify({ cookies: arr, label: cookieLabel.trim() || undefined }),
                     });
                     const data = await res.json();
                     if (res.ok && data.success) {
-                      setCookieMsg({ ok: true, text: `✅ ${data.count} cookies saved! Will be auto-injected into all new profiles.` });
+                      setCookieMsg({ ok: true, text: `✅ ${data.count} cookies added! Pool now has ${data.poolSize} set${data.poolSize !== 1 ? 's' : ''}.` });
                       setCookieJson('');
+                      setCookieLabel('');
                       await refreshCookieStatus();
                     } else {
                       setCookieMsg({ ok: false, text: data.error || 'Save failed' });
                     }
                   } catch (e: any) {
-                    setCookieMsg({ ok: false, text: `Invalid JSON: ${e.message}` });
+                    setCookieMsg({ ok: false, text: `Invalid JSON: ${(e as Error).message}` });
                   }
                   setCookieSaving(false);
                 }}
               >
                 <Save size={14} />
-                {cookieSaving ? 'Saving…' : 'Save Cookies'}
+                {cookieSaving ? 'Adding…' : 'Add to Pool'}
               </button>
             </div>
           </div>

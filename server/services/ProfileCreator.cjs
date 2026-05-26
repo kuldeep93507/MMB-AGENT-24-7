@@ -308,8 +308,9 @@ class ProfileCreator {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     let cookiesImported = false;
 
-    // Merge: stored real cookies (from Settings) + any cookies passed in options
-    const storedCookies = this._loadStoredCookies();
+    // Merge: stored real cookies (from Settings pool) + any cookies passed in options
+    // profileId used as seed so same profile always gets same cookie set from pool
+    const storedCookies = this._loadStoredCookies(profileId);
     const allCookies = [...storedCookies, ...(Array.isArray(cookies) ? cookies : [])];
 
     if (allCookies.length > 0 && profileId) {
@@ -497,16 +498,42 @@ class ProfileCreator {
   }
 
   /**
-   * Load real cookies stored via Settings → Cookie Import.
-   * Returns empty array if no cookies saved or file missing/corrupt.
+   * Load a random cookie set from the pool stored via Settings → Cookie Import.
+   * Each profile creation picks a different random set — avoids identical cookie fingerprints.
+   * Returns empty array if pool is empty, file missing, or corrupt.
+   * @param {string} [profileId] - Used as seed for deterministic selection (same profile = same set)
    * @returns {Array}
    * @private
    */
-  _loadStoredCookies() {
+  _loadStoredCookies(profileId) {
     try {
       if (!fs.existsSync(STORED_COOKIES_FILE)) return [];
       const data = JSON.parse(fs.readFileSync(STORED_COOKIES_FILE, 'utf8'));
-      return Array.isArray(data.cookies) ? data.cookies : [];
+
+      // Support both old format { cookies: [...] } and new pool format { pool: [...] }
+      if (Array.isArray(data.cookies) && data.cookies.length > 0 && !data.pool) {
+        // Legacy single-set: return as-is
+        return data.cookies;
+      }
+
+      const pool = Array.isArray(data.pool) ? data.pool.filter(s => Array.isArray(s.cookies) && s.cookies.length > 0) : [];
+      if (pool.length === 0) return [];
+
+      // Pick a random set — use profileId hash as seed so same profile always gets same set
+      let idx = 0;
+      if (profileId) {
+        let hash = 0;
+        for (let i = 0; i < profileId.length; i++) {
+          hash = ((hash << 5) - hash + profileId.charCodeAt(i)) | 0;
+        }
+        idx = Math.abs(hash) % pool.length;
+      } else {
+        idx = Math.floor(Math.random() * pool.length);
+      }
+
+      const chosen = pool[idx];
+      console.log(`[ProfileCreator] Cookie pool: picked set ${idx + 1}/${pool.length} (${chosen.cookies.length} cookies, label: ${chosen.label || 'unnamed'})`);
+      return chosen.cookies;
     } catch {
       return [];
     }

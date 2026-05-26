@@ -464,57 +464,91 @@ router.post('/api/profiles/list-all', async (req, res) => {
 
 const STORED_COOKIES_FILE = path.join(__dirname, '..', '..', 'youtube-cookies.json');
 
-/** GET /api/cookies/status — how many cookies saved, when last imported */
+/** Load pool file, returns { pool: [] } always */
+function loadCookiePoolFile() {
+  try {
+    if (!fs.existsSync(STORED_COOKIES_FILE)) return { pool: [] };
+    const data = JSON.parse(fs.readFileSync(STORED_COOKIES_FILE, 'utf8'));
+    // Migrate legacy single-set format to pool format
+    if (Array.isArray(data.cookies) && !data.pool) {
+      return { pool: [{ id: 'set_legacy', label: 'Imported (legacy)', importedAt: data.importedAt || Date.now(), cookies: data.cookies }] };
+    }
+    return { pool: Array.isArray(data.pool) ? data.pool : [] };
+  } catch { return { pool: [] }; }
+}
+
+function saveCookiePoolFile(pool) {
+  fs.writeFileSync(STORED_COOKIES_FILE, JSON.stringify({ pool, updatedAt: Date.now() }, null, 2));
+}
+
+/** GET /api/cookies/status — pool summary */
 router.get('/api/cookies/status', (req, res) => {
   try {
-    if (!fs.existsSync(STORED_COOKIES_FILE)) {
-      return res.json({ hasCookies: false, count: 0, importedAt: null });
-    }
-    const data = JSON.parse(fs.readFileSync(STORED_COOKIES_FILE, 'utf8'));
-    const cookies = Array.isArray(data.cookies) ? data.cookies : [];
+    const { pool } = loadCookiePoolFile();
     res.json({
-      hasCookies: cookies.length > 0,
-      count: cookies.length,
-      importedAt: data.importedAt || null,
-      domains: [...new Set(cookies.map(c => c.domain).filter(Boolean))].slice(0, 10),
+      hasCookies: pool.length > 0,
+      poolSize: pool.length,
+      sets: pool.map(s => ({
+        id: s.id,
+        label: s.label || 'Unnamed set',
+        count: Array.isArray(s.cookies) ? s.cookies.length : 0,
+        importedAt: s.importedAt || null,
+        domains: [...new Set((s.cookies || []).map(c => c.domain).filter(Boolean))].slice(0, 5),
+      })),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-/** POST /api/cookies/import — save real cookies from Chrome Cookie-Editor export */
+/** POST /api/cookies/import — ADD a new set to the pool */
 router.post('/api/cookies/import', (req, res) => {
   try {
-    const { cookies } = req.body || {};
+    const { cookies, label } = req.body || {};
     if (!Array.isArray(cookies) || cookies.length === 0) {
-      return res.status(400).json({ success: false, error: 'cookies array is required and must not be empty' });
+      return res.status(400).json({ success: false, error: 'cookies array required and must not be empty' });
     }
-    // Basic validation — each cookie must have at least name + domain
     const valid = cookies.filter(c => c && typeof c === 'object' && c.name && c.domain);
     if (valid.length === 0) {
       return res.status(400).json({ success: false, error: 'No valid cookies found (each needs name + domain)' });
     }
-    const payload = {
-      cookies: valid,
+    const { pool } = loadCookiePoolFile();
+    const newSet = {
+      id: `set_${Date.now()}`,
+      label: label || `Set ${pool.length + 1}`,
       importedAt: Date.now(),
-      count: valid.length,
+      cookies: valid,
     };
-    fs.writeFileSync(STORED_COOKIES_FILE, JSON.stringify(payload, null, 2));
-    console.log(`[CookieStore] Saved ${valid.length} real cookies from Cookie-Editor import`);
-    res.json({ success: true, count: valid.length, importedAt: payload.importedAt });
+    pool.push(newSet);
+    saveCookiePoolFile(pool);
+    console.log(`[CookiePool] Added set "${newSet.label}" — ${valid.length} cookies. Pool size: ${pool.length}`);
+    res.json({ success: true, id: newSet.id, count: valid.length, poolSize: pool.length });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-/** DELETE /api/cookies/clear — remove all stored cookies */
+/** DELETE /api/cookies/set/:id — remove one set from pool */
+router.delete('/api/cookies/set/:id', (req, res) => {
+  try {
+    const { pool } = loadCookiePoolFile();
+    const filtered = pool.filter(s => s.id !== req.params.id);
+    if (filtered.length === pool.length) {
+      return res.status(404).json({ success: false, error: 'Set not found' });
+    }
+    saveCookiePoolFile(filtered);
+    console.log(`[CookiePool] Removed set ${req.params.id}. Pool size: ${filtered.length}`);
+    res.json({ success: true, poolSize: filtered.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/** DELETE /api/cookies/clear — remove entire pool */
 router.delete('/api/cookies/clear', (req, res) => {
   try {
-    if (fs.existsSync(STORED_COOKIES_FILE)) {
-      fs.unlinkSync(STORED_COOKIES_FILE);
-    }
-    console.log('[CookieStore] Stored cookies cleared');
+    if (fs.existsSync(STORED_COOKIES_FILE)) fs.unlinkSync(STORED_COOKIES_FILE);
+    console.log('[CookiePool] Entire pool cleared');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
